@@ -1,0 +1,63 @@
+@baseUrl = http://localhost:8080
+@idempotencyKey = 10000000-0000-4000-8000-000000000001
+@update_id = 00000000-0000-0000-0000-000000000001
+@pair = EUR/MXN
+
+### Health check
+GET {{baseUrl}}/healthz
+Accept: application/json
+
+> {%
+    client.test("HTTP server is healthy", function () {
+        client.assert(response.status === 200, "Expected HTTP 200");
+        client.assert(response.body["status"] === "ok", "Expected status=ok");
+    });
+%}
+
+### Readiness check
+GET {{baseUrl}}/readyz
+Accept: application/json
+
+### Create quote update and save its ID
+POST {{baseUrl}}/api/v1/quote-updates
+Content-Type: application/json
+Accept: application/json
+Idempotency-Key: {{idempotencyKey}}
+
+{
+  "pair": "EUR/MXN"
+}
+
+> {%
+    const updateId = response.body["update_id"];
+
+    client.test("Quote update is accepted", function () {
+        client.assert(response.status === 202, "Expected HTTP 202");
+        client.assert(updateId, "Response does not contain update_id");
+    });
+
+    if (updateId) {
+        client.global.set("update_id", updateId);
+        client.log("Saved update_id: " + updateId);
+    }
+%}
+
+### Get quote update by the ID saved above
+GET {{baseUrl}}/api/v1/quote-updates/{{update_id}}
+Accept: application/json
+
+### Get latest completed quote
+GET {{baseUrl}}/api/v1/quotes/latest?pair={{pair}}
+Accept: application/json
+
+### Unknown update ID returns 404
+GET {{baseUrl}}/api/v1/quote-updates/00000000-0000-0000-0000-000000000001
+Accept: application/json
+
+### Invalid pair returns 400
+GET {{baseUrl}}/api/v1/quotes/latest?pair=EUR
+Accept: application/json
+
+### Unsupported currency returns 400
+GET {{baseUrl}}/api/v1/quotes/latest?pair=EUR/RUB
+Accept: application/json

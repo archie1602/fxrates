@@ -1,0 +1,323 @@
+openapi: 3.0.3
+info:
+  title: FX Rates API
+  version: 1.0.0
+  description: Asynchronous API for fetching and storing currency exchange rates.
+  license:
+    name: Unlicensed
+servers:
+  - url: http://localhost:8080
+    description: Local development
+security: []
+tags:
+  - name: Quote updates
+    description: Create and inspect asynchronous quote update requests.
+  - name: Quotes
+    description: Read successfully fetched exchange rates.
+  - name: Health
+    description: Inspect HTTP server availability.
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Check whether the HTTP server is running
+      responses:
+        "200":
+          description: HTTP server is running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "405":
+          description: Method not allowed.
+
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      summary: Check whether the service can access PostgreSQL
+      responses:
+        "200":
+          description: The service is ready to handle requests.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: PostgreSQL is unavailable or the readiness query timed out.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "405":
+          description: Method not allowed.
+
+  /api/v1/quote-updates:
+    post:
+      tags: [Quote updates]
+      operationId: createQuoteUpdate
+      summary: Start a quote update
+      description: >-
+        Creates a durable update request that is processed in the background.
+        Reusing an Idempotency-Key with the same currency pair returns the
+        previously created update instead of starting another one.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQuoteUpdateRequest"
+      responses:
+        "202":
+          description: Update request was accepted for background processing.
+          headers:
+            Location:
+              description: Relative URL of the created update resource.
+              schema:
+                type: string
+                example: /api/v1/quote-updates/01900000-0000-7000-8000-000000000001
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuoteUpdateAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/IdempotencyKeyConflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/quote-updates/{id}:
+    get:
+      tags: [Quote updates]
+      operationId: getQuoteUpdate
+      summary: Get a quote update by ID
+      parameters:
+        - $ref: "#/components/parameters/UpdateID"
+      responses:
+        "200":
+          description: Current state and, when completed, the resulting quote.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuoteUpdate"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/quotes/latest:
+    get:
+      tags: [Quotes]
+      operationId: getLatestQuote
+      summary: Get the latest completed quote for a currency pair
+      parameters:
+        - name: pair
+          in: query
+          required: true
+          description: Currency pair in canonical BASE/QUOTE form.
+          schema:
+            $ref: "#/components/schemas/CurrencyPair"
+      responses:
+        "200":
+          description: Latest successfully fetched quote.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Quote"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >-
+        Client-generated non-zero UUID. Reuse it only when retrying the same
+        currency-pair update request.
+      schema:
+        type: string
+        format: uuid
+      example: 10000000-0000-4000-8000-000000000001
+
+    UpdateID:
+      name: id
+      in: path
+      required: true
+      description: Quote update identifier.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Request body, identifier, idempotency key, or currency pair is invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Quote update or completed quote was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    UnsupportedMediaType:
+      description: Content-Type must be application/json.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    IdempotencyKeyConflict:
+      description: The Idempotency-Key was already used for another currency pair.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalServerError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    CurrencyPair:
+      type: string
+      pattern: "^[A-Z]{3}/[A-Z]{3}$"
+      enum: [USD/EUR, USD/MXN, EUR/USD, EUR/MXN, MXN/USD, MXN/EUR]
+      example: EUR/MXN
+      description: Pair of different currencies. Supported currencies are EUR, MXN, and USD.
+
+    UpdateStatus:
+      type: string
+      enum: [pending, processing, completed, failed]
+
+    DecimalRate:
+      type: string
+      pattern: "^0*[0-9]{1,18}(\\.[0-9]{1,12})?$"
+      example: "19.909000000000"
+      description: Decimal value encoded as a string to avoid float64 precision loss.
+
+    CreateQuoteUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [pair]
+      properties:
+        pair:
+          $ref: "#/components/schemas/CurrencyPair"
+
+    QuoteUpdateAccepted:
+      type: object
+      required: [update_id, pair, status, created_at]
+      properties:
+        update_id:
+          type: string
+          format: uuid
+        pair:
+          $ref: "#/components/schemas/CurrencyPair"
+        status:
+          $ref: "#/components/schemas/UpdateStatus"
+        created_at:
+          type: string
+          format: date-time
+
+    QuoteUpdate:
+      type: object
+      required:
+        - update_id
+        - pair
+        - status
+        - updated_at
+        - rate
+        - rate_date
+        - fetched_at
+      properties:
+        update_id:
+          type: string
+          format: uuid
+        pair:
+          $ref: "#/components/schemas/CurrencyPair"
+        status:
+          $ref: "#/components/schemas/UpdateStatus"
+        updated_at:
+          type: string
+          format: date-time
+        error_message:
+          type: string
+          description: Internal failure description. Present only when an update fails.
+        rate:
+          type: string
+          pattern: "^0*[0-9]{1,18}(\\.[0-9]{1,12})?$"
+          example: "19.909000000000"
+          nullable: true
+          description: Decimal value encoded as a string to avoid float64 precision loss.
+        rate_date:
+          type: string
+          format: date
+          nullable: true
+          description: Calendar date reported by the upstream provider.
+        fetched_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Time at which this service fetched the rate.
+
+    Quote:
+      type: object
+      required: [update_id, pair, rate, rate_date, fetched_at]
+      properties:
+        update_id:
+          type: string
+          format: uuid
+        pair:
+          $ref: "#/components/schemas/CurrencyPair"
+        rate:
+          $ref: "#/components/schemas/DecimalRate"
+        rate_date:
+          type: string
+          format: date
+          description: Calendar date reported by the upstream provider.
+        fetched_at:
+          type: string
+          format: date-time
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/APIError"
+
+    APIError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: invalid_currency_pair
+        message:
+          type: string
+          example: currency pair must have format BASE/QUOTE with different currencies

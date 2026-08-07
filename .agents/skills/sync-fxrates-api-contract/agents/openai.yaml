@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sync FX Rates API Contract"
+  short_description: "Keep OpenAPI and HTTP implementation aligned"
+  default_prompt: "Use $sync-fxrates-api-contract to compare the FX Rates HTTP implementation with openapi.yaml and synchronize the requested contract changes."
