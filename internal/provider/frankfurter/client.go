@@ -1,4 +1,3 @@
-// Package frankfurter implements the exchange-rate provider using the Frankfurter HTTP API.
 package frankfurter
 
 import (
@@ -21,20 +20,17 @@ const (
 	maxResponseBodyBytes = 64 << 10
 )
 
-// Client fetches exchange rates from Frankfurter.
 type Client struct {
 	httpClient *http.Client
 	baseURL    *url.URL
 	retry      RetryPolicy
 }
 
-// RetryPolicy configures bounded retries for transient upstream failures.
 type RetryPolicy struct {
 	MaxAttempts int
 	Delay       time.Duration
 }
 
-// UpstreamError describes a non-successful response from Frankfurter.
 type UpstreamError struct {
 	StatusCode int
 	Message    string
@@ -48,7 +44,6 @@ func (e *UpstreamError) Error() string {
 	return fmt.Sprintf("frankfurter returned HTTP status %d: %s", e.StatusCode, e.Message)
 }
 
-// New creates a Frankfurter client with the supplied HTTP client and retry policy.
 func New(httpClient *http.Client, baseURL string, retry RetryPolicy) (*Client, error) {
 	if httpClient == nil {
 		return nil, errors.New("create frankfurter client: HTTP client is required")
@@ -78,7 +73,6 @@ func New(httpClient *http.Client, baseURL string, retry RetryPolicy) (*Client, e
 	}, nil
 }
 
-// FetchRate returns a validated snapshot supplied by Frankfurter.
 func (c *Client) FetchRate(ctx context.Context, pair domain.Pair) (service.RateSnapshot, error) {
 	validatedPair, err := domain.ParsePair(string(pair))
 	if err != nil {

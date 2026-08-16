@@ -10,7 +10,6 @@ import (
 	"fxrates/internal/domain"
 )
 
-// QuoteUpdateWorker processes pending quote updates in the background.
 type QuoteUpdateWorker struct {
 	updates      QuoteUpdateProcessorRepository
 	rates        RateProvider
@@ -51,8 +50,6 @@ func NewQuoteUpdateWorker(
 	}, nil
 }
 
-// Run processes all available updates and waits for new work when the queue is
-// empty. A failure of one update is logged but does not stop the worker.
 func (w *QuoteUpdateWorker) Run(ctx context.Context) error {
 	for {
 		processed, err := w.processNext(ctx)

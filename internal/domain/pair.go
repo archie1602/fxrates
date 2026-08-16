@@ -16,7 +16,6 @@ var supportedCurrencies = map[string]struct{}{
 	"USD": {},
 }
 
-// ParsePair validates and normalizes a currency pair.
 func ParsePair(value string) (Pair, error) {
 	value = strings.ToUpper(strings.TrimSpace(value))
 	parts := strings.Split(value, "/")

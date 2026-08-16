@@ -9,8 +9,6 @@ import (
 	"fxrates/internal/domain"
 )
 
-// QuoteUpdateProcessorRepository contains the persistence operations required
-// by the background quote-update worker.
 type QuoteUpdateProcessorRepository interface {
 	TakeNextPendingUpdate(
 		ctx context.Context,

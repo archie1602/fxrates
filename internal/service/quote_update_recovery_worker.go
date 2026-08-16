@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-// QuoteUpdateRecoveryRepository contains persistence operation required by the stale-update recovery worker.
 type QuoteUpdateRecoveryRepository interface {
 	RequeueStaleProcessingUpdates(
 		ctx context.Context,
@@ -16,7 +15,6 @@ type QuoteUpdateRecoveryRepository interface {
 	) (int64, error)
 }
 
-// QuoteUpdateRecoveryWorker periodically returns stale processing updates to the pending state so they can be processed again.
 type QuoteUpdateRecoveryWorker struct {
 	updates           QuoteUpdateRecoveryRepository
 	timeProvider      TimeProvider
@@ -57,7 +55,6 @@ func NewQuoteUpdateRecoveryWorker(
 	}, nil
 }
 
-// Run recovers stale updates immediately and then repeats the operation at the configured interval until the context is canceled.
 func (w *QuoteUpdateRecoveryWorker) Run(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return nil
