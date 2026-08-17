@@ -82,70 +82,63 @@ func TestReadiness(t *testing.T) {
 		if response.Code != http.StatusServiceUnavailable {
 			t.Fatalf("status = %d, want %d", response.Code, http.StatusServiceUnavailable)
 		}
-		var body struct {
-			Error struct {
-				Code string `json:"code"`
-			} `json:"error"`
-		}
-		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-		if body.Error.Code != "not_ready" {
-			t.Errorf("error code = %q, want %q", body.Error.Code, "not_ready")
+		if code := decodeErrorCode(t, response); code != "not_ready" {
+			t.Errorf("error code = %q, want %q", code, "not_ready")
 		}
 	})
 }
 
 func TestCreateQuoteUpdateIdempotencyErrors(t *testing.T) {
-	t.Run("rejects invalid key", func(t *testing.T) {
-		serviceStub := &quoteServiceStub{}
-		request := httptest.NewRequest(
-			http.MethodPost,
-			"/api/v1/quote-updates",
-			strings.NewReader(`{"pair":"EUR/MXN"}`),
-		)
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Idempotency-Key", "not-a-uuid")
-		response := httptest.NewRecorder()
+	tests := []struct {
+		name            string
+		idempotencyKey  string
+		serviceErr      error
+		wantStatus      int
+		wantCode        string
+		wantCreateCalls int
+	}{
+		{
+			name:            "rejects invalid key",
+			idempotencyKey:  "not-a-uuid",
+			wantStatus:      http.StatusBadRequest,
+			wantCode:        "invalid_idempotency_key",
+			wantCreateCalls: 0,
+		},
+		{
+			name:            "maps key conflict to unprocessable content",
+			idempotencyKey:  "10000000-0000-4000-8000-000000000001",
+			serviceErr:      service.ErrIdempotencyKeyConflict,
+			wantStatus:      http.StatusUnprocessableEntity,
+			wantCode:        "idempotency_key_conflict",
+			wantCreateCalls: 1,
+		},
+	}
 
-		newTestHandler(serviceStub).ServeHTTP(response, request)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			serviceStub := &quoteServiceStub{createErr: test.serviceErr}
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/quote-updates",
+				strings.NewReader(`{"pair":"EUR/MXN"}`),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Idempotency-Key", test.idempotencyKey)
+			response := httptest.NewRecorder()
 
-		if response.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
-		}
-		if serviceStub.createCalls != 0 {
-			t.Errorf("CreateQuoteUpdate calls = %d, want 0", serviceStub.createCalls)
-		}
-	})
+			newTestHandler(serviceStub).ServeHTTP(response, request)
 
-	t.Run("maps key conflict to unprocessable content", func(t *testing.T) {
-		serviceStub := &quoteServiceStub{createErr: service.ErrIdempotencyKeyConflict}
-		request := httptest.NewRequest(
-			http.MethodPost,
-			"/api/v1/quote-updates",
-			strings.NewReader(`{"pair":"EUR/MXN"}`),
-		)
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Idempotency-Key", "10000000-0000-4000-8000-000000000001")
-		response := httptest.NewRecorder()
-
-		newTestHandler(serviceStub).ServeHTTP(response, request)
-
-		if response.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("status = %d, want %d", response.Code, http.StatusUnprocessableEntity)
-		}
-		var body struct {
-			Error struct {
-				Code string `json:"code"`
-			} `json:"error"`
-		}
-		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-		if body.Error.Code != "idempotency_key_conflict" {
-			t.Errorf("error code = %q, want %q", body.Error.Code, "idempotency_key_conflict")
-		}
-	})
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d", response.Code, test.wantStatus)
+			}
+			if code := decodeErrorCode(t, response); code != test.wantCode {
+				t.Errorf("error code = %q, want %q", code, test.wantCode)
+			}
+			if serviceStub.createCalls != test.wantCreateCalls {
+				t.Errorf("CreateQuoteUpdate calls = %d, want %d", serviceStub.createCalls, test.wantCreateCalls)
+			}
+		})
+	}
 }
 
 func TestGetFailedQuoteUpdate(t *testing.T) {
@@ -248,6 +241,14 @@ func TestGetQuoteUpdateNotFound(t *testing.T) {
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
 	}
+	if code := decodeErrorCode(t, response); code != "quote_update_not_found" {
+		t.Errorf("error code = %q, want %q", code, "quote_update_not_found")
+	}
+}
+
+func decodeErrorCode(t *testing.T, response *httptest.ResponseRecorder) string {
+	t.Helper()
+
 	var body struct {
 		Error struct {
 			Code string `json:"code"`
@@ -256,9 +257,8 @@ func TestGetQuoteUpdateNotFound(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body.Error.Code != "quote_update_not_found" {
-		t.Errorf("error code = %q, want %q", body.Error.Code, "quote_update_not_found")
-	}
+
+	return body.Error.Code
 }
 
 type quoteServiceStub struct {
