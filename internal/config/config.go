@@ -18,9 +18,11 @@ const (
 	defaultFrankfurterMaxAttempts = 3
 	defaultFrankfurterRetryDelay  = 250 * time.Millisecond
 	defaultFrankfurterMaxDelay    = 5 * time.Second
+	defaultWorkerCount            = 4
 	defaultWorkerPollInterval     = 500 * time.Millisecond
 	defaultRecoveryInterval       = 10 * time.Second
 	defaultProcessingTimeout      = 30 * time.Second
+	maxWorkerCount                = 32
 )
 
 type Config struct {
@@ -34,6 +36,7 @@ type Config struct {
 	FrankfurterMaxAttempts int
 	FrankfurterRetryDelay  time.Duration
 	FrankfurterMaxDelay    time.Duration
+	WorkerCount            int
 	WorkerPollInterval     time.Duration
 	RecoveryInterval       time.Duration
 	ProcessingTimeout      time.Duration
@@ -68,6 +71,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	workerCount, err := intOrDefault("WORKER_COUNT", defaultWorkerCount)
+	if err != nil {
+		return Config{}, err
+	}
 	workerPollInterval, err := durationOrDefault("WORKER_POLL_INTERVAL", defaultWorkerPollInterval)
 	if err != nil {
 		return Config{}, err
@@ -92,6 +99,7 @@ func Load() (Config, error) {
 		FrankfurterMaxAttempts: frankfurterMaxAttempts,
 		FrankfurterRetryDelay:  frankfurterRetryDelay,
 		FrankfurterMaxDelay:    frankfurterMaxDelay,
+		WorkerCount:            workerCount,
 		WorkerPollInterval:     workerPollInterval,
 		RecoveryInterval:       recoveryInterval,
 		ProcessingTimeout:      processingTimeout,
@@ -125,6 +133,9 @@ func (c Config) Validate() error {
 	}
 	if c.FrankfurterRetryDelay > c.FrankfurterMaxDelay {
 		return errors.New("FRANKFURTER_RETRY_DELAY must not exceed FRANKFURTER_RETRY_MAX_DELAY")
+	}
+	if c.WorkerCount < 1 || c.WorkerCount > maxWorkerCount {
+		return fmt.Errorf("WORKER_COUNT must be between 1 and %d", maxWorkerCount)
 	}
 	if c.WorkerPollInterval <= 0 {
 		return errors.New("WORKER_POLL_INTERVAL must be positive")

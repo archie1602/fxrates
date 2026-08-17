@@ -74,15 +74,19 @@ func run(logger *slog.Logger) error {
 		timeProvider,
 		service.UUIDv7Generator{},
 	)
-	quoteUpdateWorker, err := service.NewQuoteUpdateWorker(
-		updateRepository,
-		rateProvider,
-		timeProvider,
-		logger,
-		cfg.WorkerPollInterval,
-	)
-	if err != nil {
-		return fmt.Errorf("configure quote update worker: %w", err)
+	quoteUpdateWorkers := make([]*service.QuoteUpdateWorker, 0, cfg.WorkerCount)
+	for workerIndex := range cfg.WorkerCount {
+		worker, err := service.NewQuoteUpdateWorker(
+			updateRepository,
+			rateProvider,
+			timeProvider,
+			logger.With("worker_id", workerIndex+1),
+			cfg.WorkerPollInterval,
+		)
+		if err != nil {
+			return fmt.Errorf("configure quote update worker %d: %w", workerIndex+1, err)
+		}
+		quoteUpdateWorkers = append(quoteUpdateWorkers, worker)
 	}
 	quoteUpdateRecoveryWorker, err := service.NewQuoteUpdateRecoveryWorker(
 		updateRepository,
@@ -110,9 +114,11 @@ func run(logger *slog.Logger) error {
 	group.Go(func() error {
 		return server.Run(groupCtx)
 	})
-	group.Go(func() error {
-		return quoteUpdateWorker.Run(groupCtx)
-	})
+	for _, worker := range quoteUpdateWorkers {
+		group.Go(func() error {
+			return worker.Run(groupCtx)
+		})
+	}
 	group.Go(func() error {
 		return quoteUpdateRecoveryWorker.Run(groupCtx)
 	})

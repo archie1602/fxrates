@@ -15,6 +15,7 @@ func TestLoadParsesValues(t *testing.T) {
 	t.Setenv("FRANKFURTER_MAX_ATTEMPTS", "4")
 	t.Setenv("FRANKFURTER_RETRY_DELAY", "100ms")
 	t.Setenv("FRANKFURTER_RETRY_MAX_DELAY", "2s")
+	t.Setenv("WORKER_COUNT", "6")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -33,6 +34,9 @@ func TestLoadParsesValues(t *testing.T) {
 			cfg.FrankfurterRetryDelay,
 			cfg.FrankfurterMaxDelay,
 		)
+	}
+	if cfg.WorkerCount != 6 {
+		t.Errorf("WorkerCount = %d, want 6", cfg.WorkerCount)
 	}
 }
 
@@ -54,17 +58,42 @@ func TestValidateRejectsInsufficientProcessingTimeout(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsNonPositiveDatabaseQueryTimeout(t *testing.T) {
+func TestValidateRejectsInvalidConfiguration(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "non-positive database query timeout", key: "DATABASE_QUERY_TIMEOUT", value: "0s"},
+		{name: "worker count above limit", key: "WORKER_COUNT", value: "33"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resetDurationEnvironment(t)
+			t.Setenv("DATABASE_URL", "postgres://example")
+			t.Setenv(test.key, test.value)
+
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("Load returned unexpected error: %v", err)
+			}
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), test.key) {
+				t.Fatalf("Validate error = %v, want error mentioning %s", err, test.key)
+			}
+		})
+	}
+}
+
+func TestLoadUsesDefaultWorkerCount(t *testing.T) {
 	resetDurationEnvironment(t)
-	t.Setenv("DATABASE_URL", "postgres://example")
-	t.Setenv("DATABASE_QUERY_TIMEOUT", "0s")
 
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load returned unexpected error: %v", err)
 	}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "DATABASE_QUERY_TIMEOUT") {
-		t.Fatalf("Validate error = %v, want database query timeout error", err)
+	if cfg.WorkerCount != 4 {
+		t.Errorf("WorkerCount = %d, want 4", cfg.WorkerCount)
 	}
 }
 
@@ -107,4 +136,5 @@ func resetDurationEnvironment(t *testing.T) {
 		t.Setenv(key, "")
 	}
 	t.Setenv("FRANKFURTER_MAX_ATTEMPTS", "")
+	t.Setenv("WORKER_COUNT", "")
 }

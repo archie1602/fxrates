@@ -29,7 +29,7 @@ CI (`.github/workflows/ci.yml`) additionally fails on any file that `gofmt -l` r
 
 ## Request lifecycle
 
-`POST /api/v1/quote-updates` never calls the upstream provider. It validates, inserts a `pending` row, and returns `202` with the id. Everything else happens in two background goroutines started alongside the HTTP server by an `errgroup` in `cmd/api/main.go`:
+`POST /api/v1/quote-updates` never calls the upstream provider. It validates, inserts a `pending` row, and returns `202` with the id. Everything else happens in background goroutines started alongside the HTTP server by an `errgroup` in `cmd/api/main.go`:
 
 1. `QuoteUpdateWorker` calls `TakeNextPendingUpdate`, a single CTE that claims one row with `FOR UPDATE SKIP LOCKED` and flips it to `processing`. Multiple instances can share the queue because of this.
 2. The Frankfurter call happens **after** that short transaction has committed — never hold a database transaction across the HTTP call.
