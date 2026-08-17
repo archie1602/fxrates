@@ -1,7 +1,7 @@
 @baseUrl = http://localhost:8080
 @idempotencyKey = 10000000-0000-4000-8000-000000000001
 @update_id = 00000000-0000-0000-0000-000000000001
-@pair = EUR/MXN
+@pair = eur/mxn
 
 ### Health check
 GET {{baseUrl}}/healthz
@@ -25,7 +25,7 @@ Accept: application/json
 Idempotency-Key: {{idempotencyKey}}
 
 {
-  "pair": "EUR/MXN"
+  "pair": "{{pair}}"
 }
 
 > {%

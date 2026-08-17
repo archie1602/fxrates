@@ -123,9 +123,9 @@ paths:
         - name: pair
           in: query
           required: true
-          description: Currency pair in canonical BASE/QUOTE form.
+          description: Currency pair in case-insensitive BASE/QUOTE form.
           schema:
-            $ref: "#/components/schemas/CurrencyPair"
+            $ref: "#/components/schemas/CurrencyPairInput"
       responses:
         "200":
           description: Latest successfully fetched quote.
@@ -196,6 +196,14 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
 
   schemas:
+    CurrencyPairInput:
+      type: string
+      pattern: "^(?:[Uu][Ss][Dd]/(?:[Ee][Uu][Rr]|[Mm][Xx][Nn])|[Ee][Uu][Rr]/(?:[Uu][Ss][Dd]|[Mm][Xx][Nn])|[Mm][Xx][Nn]/(?:[Uu][Ss][Dd]|[Ee][Uu][Rr]))$"
+      example: eur/mxn
+      description: >-
+        Pair of different currencies. Input is case-insensitive and is normalized
+        to uppercase. Supported currencies are EUR, MXN, and USD.
+
     CurrencyPair:
       type: string
       pattern: "^[A-Z]{3}/[A-Z]{3}$"
@@ -219,7 +227,7 @@ components:
       required: [pair]
       properties:
         pair:
-          $ref: "#/components/schemas/CurrencyPair"
+          $ref: "#/components/schemas/CurrencyPairInput"
 
     QuoteUpdateAccepted:
       type: object

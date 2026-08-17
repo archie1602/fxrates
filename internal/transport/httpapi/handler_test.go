@@ -207,7 +207,7 @@ func TestGetLatestQuote(t *testing.T) {
 	}
 	request := httptest.NewRequest(
 		http.MethodGet,
-		"/api/v1/quotes/latest?pair=USD%2FMXN",
+		"/api/v1/quotes/latest?pair=usd%2Fmxn",
 		nil,
 	)
 	response := httptest.NewRecorder()
@@ -216,6 +216,9 @@ func TestGetLatestQuote(t *testing.T) {
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if serviceStub.latestPair != "USD/MXN" {
+		t.Errorf("service pair = %q, want %q", serviceStub.latestPair, "USD/MXN")
 	}
 	var body struct {
 		Rate      string    `json:"rate"`
@@ -268,6 +271,7 @@ type quoteServiceStub struct {
 	getErr         error
 	latestResult   domain.Quote
 	latestErr      error
+	latestPair     domain.Pair
 }
 
 type readinessCheckerStub struct {
@@ -296,7 +300,8 @@ func (s *quoteServiceStub) GetQuoteUpdate(
 	return s.getResult, s.getErr
 }
 
-func (s *quoteServiceStub) GetLatest(context.Context, domain.Pair) (domain.Quote, error) {
+func (s *quoteServiceStub) GetLatest(_ context.Context, pair domain.Pair) (domain.Quote, error) {
+	s.latestPair = pair
 	return s.latestResult, s.latestErr
 }
 
