@@ -65,10 +65,9 @@ Go-канал, но тогда при перезапуске приложени�
 повторный запрос раньше указанного времени; если требуемая задержка превышает
 `FRANKFURTER_RETRY_MAX_DELAY`, текущая задача завершается с ошибкой.
 
-В рамках тестового оставлены unit-тесты и ручной smoke test через Docker Compose.
-Интеграционные тесты с PostgreSQL я не добавлял, чтобы не усложнять проект отдельным
-тестовым окружением для БД. В production они понадобились бы для проверки SQL-запросов,
-транзакций и миграций.
+SQL-запросы, транзакционные гарантии очереди и fencing token проверяются
+интеграционными тестами на настоящем PostgreSQL. Тесты используют отдельную БД через
+`TEST_DATABASE_URL`; моки PostgreSQL для этих сценариев не применяются.
 
 ## Запуск через Docker Compose
 
@@ -165,8 +164,22 @@ make run
 make check
 ```
 
-Команда повторяет проверки GitHub Actions: OpenAPI-контракт, форматирование, целостность
-Go-модулей, `go vet` и тесты с race detector.
+Команда запускает быстрые проверки GitHub Actions: OpenAPI-контракт, форматирование,
+целостность Go-модулей, `go vet` и unit-тесты с race detector.
+
+Для PostgreSQL integration suite нужна отдельная disposable-база, имя которой
+оканчивается на `_test`, и установленный CLI `golang-migrate`. Например:
+
+```bash
+export TEST_DATABASE_URL='postgres://fxrates:fxrates@localhost:5432/fxrates_test?sslmode=disable'
+make test-integration
+```
+
+Команда применяет настоящие миграции из `migrations/` и запускает тесты репозитория с
+race detector и отключённым Go test cache. База очищается между сценариями, поэтому
+указывать development или хуже того prod-БД нельзя. В GitHub Actions для этих тестов
+поднимается отдельный PostgreSQL service container и там дополнительно проверяется цикл
+миграций up -> down -> up.
 
 ## Структура проекта
 

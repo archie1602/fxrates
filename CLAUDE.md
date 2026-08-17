@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-make test                                  # go test ./...
-go test -race ./...                        # what CI runs
+make test                                  # go test -short ./...
+make check                                 # fast CI checks, including short race tests
+TEST_DATABASE_URL=postgres://.../fxrates_test?sslmode=disable make test-integration
 go test ./internal/service -run TestQuoteUpdateWorkerProcessesPendingUpdate -v   # single test
 make vet                                   # go vet ./...
 make fmt                                   # gofmt -w over all non-vendor Go files
@@ -54,7 +55,7 @@ This is at-least-once on purpose: a crash between the provider call and `Complet
 
 ## Tests
 
-There is no PostgreSQL integration suite, so SQL and migration reversibility have to be reviewed by reading. Everything else is covered by table-driven tests with hand-written stubs in the test file (no mocking library): stub `TimeProvider` and `UUIDGenerator` for determinism, `httptest.NewServer` for the Frankfurter client, `httptest.NewRecorder` for handlers. Keep new tests in that style.
+PostgreSQL integration tests run against a real database created from `migrations/`; `TEST_DATABASE_URL` must point to a disposable database whose name ends with `_test`. The suite truncates shared tables between scenarios, so its tests must not call `t.Parallel`. Unit tests use hand-written stubs rather than a mocking library: stub `TimeProvider` and `UUIDGenerator` for determinism, `httptest.NewServer` for the Frankfurter client, and `httptest.NewRecorder` for handlers. Keep new tests in that style.
 
 ## Keep in sync
 

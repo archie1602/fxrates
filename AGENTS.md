@@ -13,7 +13,8 @@
 - `make build` compiles `./cmd/api` to `bin/fxrates`.
 - `make run` starts the API with the environment.
 - `make test` runs fast unit tests; `make fmt` formats Go source.
-- `make check` mirrors CI: it verifies modules and OpenAPI, checks formatting, vets, and runs race tests.
+- `make check` runs the fast CI checks: it verifies modules and OpenAPI, checks formatting, vets, and runs unit tests with the race detector.
+- `make test-integration` applies migrations and runs PostgreSQL integration tests. It requires `TEST_DATABASE_URL` to point to a disposable database whose name ends with `_test`.
 - `make docker-up` builds and starts PostgreSQL, migrations, and the API. Inspect them with `make docker-ps` and `make docker-logs`.
 - `make migrate-create NAME=add_field` creates a numbered migration. `make migrate-up` requires `DATABASE_URL`.
 
@@ -25,7 +26,7 @@ Use the Go version declared in `go.mod` and run `gofmt` before committing. Follo
 
 ## Testing Guidelines
 
-Use Go's `testing` package, table-driven cases, and descriptive `TestFunctionScenario` names. Prefer deterministic stubs for time, UUIDs, repositories, and providers; use `httptest` for HTTP behavior. There is no PostgreSQL integration suite, so review SQL and migration reversibility carefully. Before review, run `make check`.
+Use Go's `testing` package, table-driven cases, and descriptive `TestFunctionScenario` names. Prefer deterministic stubs for time, UUIDs, repositories, and providers; use `httptest` for HTTP behavior. PostgreSQL integration tests use a real migrated database and must not run in parallel because they reset shared tables between scenarios. Before review, run `make check` and, when changing persistence or migrations, `make test-integration`.
 
 ## Changes & Review
 
