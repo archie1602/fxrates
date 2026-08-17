@@ -69,6 +69,52 @@ func TestClientFetchRateReturnsUpstreamError(t *testing.T) {
 	}
 }
 
+func TestClientFetchRateDoesNotRetryBadRequest(t *testing.T) {
+	var attempts atomic.Int32
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"invalid request"}`))
+	}))
+
+	_, err := client.FetchRate(context.Background(), "EUR/MXN")
+	var upstreamErr *frankfurter.UpstreamError
+	if !errors.As(err, &upstreamErr) {
+		t.Fatalf("FetchRate() error = %v, want *frankfurter.UpstreamError", err)
+	}
+	if attempts.Load() != 1 {
+		t.Errorf("request attempts = %d, want 1", attempts.Load())
+	}
+}
+
+func TestClientFetchRateRetriesTransportError(t *testing.T) {
+	var attempts atomic.Int32
+	transportErr := errors.New("connection reset")
+	client, err := frankfurter.New(
+		&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			return nil, transportErr
+		})},
+		"https://example.test",
+		frankfurter.RetryPolicy{
+			MaxAttempts:  3,
+			InitialDelay: 0,
+			MaxDelay:     time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("frankfurter.New returned unexpected error: %v", err)
+	}
+
+	_, err = client.FetchRate(context.Background(), "EUR/MXN")
+	if !errors.Is(err, transportErr) {
+		t.Fatalf("FetchRate() error = %v, want wrapped %v", err, transportErr)
+	}
+	if attempts.Load() != 3 {
+		t.Errorf("request attempts = %d, want 3", attempts.Load())
+	}
+}
+
 func TestClientFetchRateRejectsInvalidRate(t *testing.T) {
 	var attempts atomic.Int32
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -99,7 +145,49 @@ func TestClientFetchRateHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestClientFetchRateRejectsRetryAfterAboveMaximum(t *testing.T) {
+	var attempts atomic.Int32
+	client := newTestClientWithPolicy(
+		t,
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			attempts.Add(1)
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"message":"rate limited"}`))
+		}),
+		frankfurter.RetryPolicy{
+			MaxAttempts:  3,
+			InitialDelay: 0,
+			MaxDelay:     time.Second,
+		},
+	)
+
+	_, err := client.FetchRate(context.Background(), "EUR/MXN")
+	var upstreamErr *frankfurter.UpstreamError
+	if !errors.As(err, &upstreamErr) {
+		t.Fatalf("FetchRate() error = %v, want wrapped *frankfurter.UpstreamError", err)
+	}
+	if !strings.Contains(err.Error(), "exceeds configured maximum") {
+		t.Fatalf("FetchRate() error = %v, want maximum delay error", err)
+	}
+	if attempts.Load() != 1 {
+		t.Errorf("request attempts = %d, want 1", attempts.Load())
+	}
+}
+
 func newTestClient(t *testing.T, handler http.Handler) *frankfurter.Client {
+	return newTestClientWithPolicy(t, handler, frankfurter.RetryPolicy{
+		MaxAttempts:  3,
+		InitialDelay: 0,
+		MaxDelay:     time.Second,
+	})
+}
+
+func newTestClientWithPolicy(
+	t *testing.T,
+	handler http.Handler,
+	retry frankfurter.RetryPolicy,
+) *frankfurter.Client {
 	t.Helper()
 
 	server := httptest.NewServer(handler)
@@ -108,10 +196,16 @@ func newTestClient(t *testing.T, handler http.Handler) *frankfurter.Client {
 	client, err := frankfurter.New(
 		server.Client(),
 		server.URL,
-		frankfurter.RetryPolicy{MaxAttempts: 3, Delay: time.Millisecond},
+		retry,
 	)
 	if err != nil {
 		t.Fatalf("frankfurter.New returned unexpected error: %v", err)
 	}
 	return client
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }

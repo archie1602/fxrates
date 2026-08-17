@@ -14,6 +14,7 @@ func TestLoadParsesValues(t *testing.T) {
 	t.Setenv("DATABASE_QUERY_TIMEOUT", "2s")
 	t.Setenv("FRANKFURTER_MAX_ATTEMPTS", "4")
 	t.Setenv("FRANKFURTER_RETRY_DELAY", "100ms")
+	t.Setenv("FRANKFURTER_RETRY_MAX_DELAY", "2s")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -25,11 +26,12 @@ func TestLoadParsesValues(t *testing.T) {
 	if cfg.DatabaseQueryTimeout != 2*time.Second {
 		t.Errorf("DatabaseQueryTimeout = %v, want %v", cfg.DatabaseQueryTimeout, 2*time.Second)
 	}
-	if cfg.FrankfurterMaxAttempts != 4 || cfg.FrankfurterRetryDelay != 100*time.Millisecond {
+	if cfg.FrankfurterMaxAttempts != 4 || cfg.FrankfurterRetryDelay != 100*time.Millisecond || cfg.FrankfurterMaxDelay != 2*time.Second {
 		t.Errorf(
-			"retry policy = %d attempts with %v delay",
+			"retry policy = %d attempts with %v initial and %v maximum delay",
 			cfg.FrankfurterMaxAttempts,
 			cfg.FrankfurterRetryDelay,
+			cfg.FrankfurterMaxDelay,
 		)
 	}
 }
@@ -40,6 +42,7 @@ func TestValidateRejectsInsufficientProcessingTimeout(t *testing.T) {
 	t.Setenv("FRANKFURTER_TIMEOUT", "5s")
 	t.Setenv("FRANKFURTER_MAX_ATTEMPTS", "3")
 	t.Setenv("FRANKFURTER_RETRY_DELAY", "250ms")
+	t.Setenv("FRANKFURTER_RETRY_MAX_DELAY", "5s")
 	t.Setenv("PROCESSING_TIMEOUT", "15s")
 
 	cfg, err := config.Load()
@@ -96,6 +99,7 @@ func resetDurationEnvironment(t *testing.T) {
 		"SHUTDOWN_TIMEOUT",
 		"FRANKFURTER_TIMEOUT",
 		"FRANKFURTER_RETRY_DELAY",
+		"FRANKFURTER_RETRY_MAX_DELAY",
 		"WORKER_POLL_INTERVAL",
 		"RECOVERY_INTERVAL",
 		"PROCESSING_TIMEOUT",

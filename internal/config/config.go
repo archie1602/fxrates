@@ -17,6 +17,7 @@ const (
 	defaultFrankfurterTimeout     = 5 * time.Second
 	defaultFrankfurterMaxAttempts = 3
 	defaultFrankfurterRetryDelay  = 250 * time.Millisecond
+	defaultFrankfurterMaxDelay    = 5 * time.Second
 	defaultWorkerPollInterval     = 500 * time.Millisecond
 	defaultRecoveryInterval       = 10 * time.Second
 	defaultProcessingTimeout      = 30 * time.Second
@@ -32,6 +33,7 @@ type Config struct {
 	FrankfurterTimeout     time.Duration
 	FrankfurterMaxAttempts int
 	FrankfurterRetryDelay  time.Duration
+	FrankfurterMaxDelay    time.Duration
 	WorkerPollInterval     time.Duration
 	RecoveryInterval       time.Duration
 	ProcessingTimeout      time.Duration
@@ -62,6 +64,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	frankfurterMaxDelay, err := durationOrDefault("FRANKFURTER_RETRY_MAX_DELAY", defaultFrankfurterMaxDelay)
+	if err != nil {
+		return Config{}, err
+	}
 	workerPollInterval, err := durationOrDefault("WORKER_POLL_INTERVAL", defaultWorkerPollInterval)
 	if err != nil {
 		return Config{}, err
@@ -85,6 +91,7 @@ func Load() (Config, error) {
 		FrankfurterTimeout:     frankfurterTimeout,
 		FrankfurterMaxAttempts: frankfurterMaxAttempts,
 		FrankfurterRetryDelay:  frankfurterRetryDelay,
+		FrankfurterMaxDelay:    frankfurterMaxDelay,
 		WorkerPollInterval:     workerPollInterval,
 		RecoveryInterval:       recoveryInterval,
 		ProcessingTimeout:      processingTimeout,
@@ -112,6 +119,12 @@ func (c Config) Validate() error {
 	}
 	if c.FrankfurterRetryDelay < 0 {
 		return errors.New("FRANKFURTER_RETRY_DELAY must not be negative")
+	}
+	if c.FrankfurterMaxDelay <= 0 {
+		return errors.New("FRANKFURTER_RETRY_MAX_DELAY must be positive")
+	}
+	if c.FrankfurterRetryDelay > c.FrankfurterMaxDelay {
+		return errors.New("FRANKFURTER_RETRY_DELAY must not exceed FRANKFURTER_RETRY_MAX_DELAY")
 	}
 	if c.WorkerPollInterval <= 0 {
 		return errors.New("WORKER_POLL_INTERVAL must be positive")
@@ -171,10 +184,10 @@ func processingTimeoutCoversRetries(c Config) bool {
 		remaining -= c.FrankfurterTimeout
 
 		if attempt < c.FrankfurterMaxAttempts {
-			if remaining <= c.FrankfurterRetryDelay {
+			if remaining <= c.FrankfurterMaxDelay {
 				return false
 			}
-			remaining -= c.FrankfurterRetryDelay
+			remaining -= c.FrankfurterMaxDelay
 		}
 	}
 

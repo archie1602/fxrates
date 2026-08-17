@@ -60,8 +60,9 @@ func run(logger *slog.Logger) error {
 		&http.Client{Timeout: cfg.FrankfurterTimeout},
 		cfg.FrankfurterBaseURL,
 		frankfurter.RetryPolicy{
-			MaxAttempts: cfg.FrankfurterMaxAttempts,
-			Delay:       cfg.FrankfurterRetryDelay,
+			MaxAttempts:  cfg.FrankfurterMaxAttempts,
+			InitialDelay: cfg.FrankfurterRetryDelay,
+			MaxDelay:     cfg.FrankfurterMaxDelay,
 		},
 	)
 	if err != nil {
