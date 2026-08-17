@@ -60,6 +60,9 @@ func TestQuoteUpdateWorkerProcessesPendingUpdate(t *testing.T) {
 	if !repository.completeCalled || repository.completedQuote != wantQuote {
 		t.Errorf("completed quote = %+v, want %+v", repository.completedQuote, wantQuote)
 	}
+	if repository.completedClaim.LeaseToken != testLeaseToken {
+		t.Errorf("completion lease token = %d, want %d", repository.completedClaim.LeaseToken, testLeaseToken)
+	}
 	if repository.completedAt != now {
 		t.Errorf("completion time = %v, want %v", repository.completedAt, now)
 	}
@@ -94,6 +97,9 @@ func TestQuoteUpdateWorkerMarksProviderFailure(t *testing.T) {
 	}
 	if repository.failedID != update.ID {
 		t.Errorf("failed update ID = %s, want %s", repository.failedID, update.ID)
+	}
+	if repository.failedClaim.LeaseToken != testLeaseToken {
+		t.Errorf("failure lease token = %d, want %d", repository.failedClaim.LeaseToken, testLeaseToken)
 	}
 	if !strings.Contains(repository.failureMessage, providerErr.Error()) {
 		t.Errorf("failure message = %q, want it to contain %q", repository.failureMessage, providerErr)
@@ -144,6 +150,66 @@ func TestQuoteUpdateWorkerRejectsRateOutsideStoragePrecision(t *testing.T) {
 	}
 }
 
+func TestQuoteUpdateWorkerDiscardsStaleCompletion(t *testing.T) {
+	now := time.Date(2026, time.August, 7, 12, 30, 0, 0, time.UTC)
+	update := domain.QuoteUpdate{
+		ID:     uuid.MustParse("01900000-0000-7000-8000-000000000001"),
+		Pair:   "EUR/MXN",
+		Status: domain.UpdateProcessing,
+	}
+	repository := &processorRepositoryStub{update: update, found: true, staleCompletion: true}
+	worker, err := NewQuoteUpdateWorker(
+		repository,
+		&rateProviderStub{snapshot: RateSnapshot{
+			Pair:     update.Pair,
+			Rate:     "19.909",
+			RateDate: now,
+		}},
+		fixedClock{now: now},
+		discardLogger(),
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("NewQuoteUpdateWorker returned unexpected error: %v", err)
+	}
+
+	processed, err := worker.processNext(context.Background())
+	if err != nil {
+		t.Fatalf("processNext returned unexpected error: %v", err)
+	}
+	if !processed {
+		t.Fatal("processNext reported that no update was processed")
+	}
+}
+
+func TestQuoteUpdateWorkerDiscardsFailureForStaleClaim(t *testing.T) {
+	now := time.Date(2026, time.August, 7, 12, 30, 0, 0, time.UTC)
+	update := domain.QuoteUpdate{
+		ID:     uuid.MustParse("01900000-0000-7000-8000-000000000001"),
+		Pair:   "EUR/MXN",
+		Status: domain.UpdateProcessing,
+	}
+	repository := &processorRepositoryStub{update: update, found: true, staleFailure: true}
+	worker, err := NewQuoteUpdateWorker(
+		repository,
+		&rateProviderStub{err: errors.New("provider unavailable")},
+		fixedClock{now: now},
+		discardLogger(),
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("NewQuoteUpdateWorker returned unexpected error: %v", err)
+	}
+
+	processed, err := worker.processNext(context.Background())
+	if err != nil {
+		t.Fatalf("processNext returned unexpected error: %v", err)
+	}
+	if !processed {
+		t.Fatal("processNext reported that no update was processed")
+	}
+}
+
 func TestQuoteUpdateRecoveryWorkerCalculatesStaleThreshold(t *testing.T) {
 	now := time.Date(2026, time.August, 7, 12, 30, 0, 0, time.UTC)
 	processingTimeout := 30 * time.Second
@@ -170,44 +236,53 @@ func TestQuoteUpdateRecoveryWorkerCalculatesStaleThreshold(t *testing.T) {
 }
 
 type processorRepositoryStub struct {
-	update         domain.QuoteUpdate
-	found          bool
-	completedQuote domain.Quote
-	completedAt    time.Time
-	completeCalled bool
-	failedID       uuid.UUID
-	failureMessage string
-	failedAt       time.Time
+	update          domain.QuoteUpdate
+	found           bool
+	completedClaim  ClaimedQuoteUpdate
+	completedQuote  domain.Quote
+	completedAt     time.Time
+	completeCalled  bool
+	staleCompletion bool
+	failedClaim     ClaimedQuoteUpdate
+	failedID        uuid.UUID
+	failureMessage  string
+	failedAt        time.Time
+	staleFailure    bool
 }
+
+const testLeaseToken ProcessingLeaseToken = 7
 
 func (s *processorRepositoryStub) TakeNextPendingUpdate(
 	context.Context,
 	time.Time,
-) (domain.QuoteUpdate, bool, error) {
-	return s.update, s.found, nil
+) (ClaimedQuoteUpdate, bool, error) {
+	return ClaimedQuoteUpdate{Update: s.update, LeaseToken: testLeaseToken}, s.found, nil
 }
 
 func (s *processorRepositoryStub) CompleteUpdate(
 	_ context.Context,
+	claim ClaimedQuoteUpdate,
 	quote domain.Quote,
 	completedAt time.Time,
-) error {
+) (bool, error) {
 	s.completeCalled = true
+	s.completedClaim = claim
 	s.completedQuote = quote
 	s.completedAt = completedAt
-	return nil
+	return !s.staleCompletion, nil
 }
 
 func (s *processorRepositoryStub) FailUpdate(
 	_ context.Context,
-	updateID uuid.UUID,
+	claim ClaimedQuoteUpdate,
 	message string,
 	failedAt time.Time,
-) error {
-	s.failedID = updateID
+) (bool, error) {
+	s.failedClaim = claim
+	s.failedID = claim.Update.ID
 	s.failureMessage = message
 	s.failedAt = failedAt
-	return nil
+	return !s.staleFailure, nil
 }
 
 type rateProviderStub struct {

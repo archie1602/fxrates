@@ -4,27 +4,33 @@ import (
 	"context"
 	"time"
 
-	"github.com/google/uuid"
-
 	"fxrates/internal/domain"
 )
+
+type ProcessingLeaseToken int64
+
+type ClaimedQuoteUpdate struct {
+	Update     domain.QuoteUpdate
+	LeaseToken ProcessingLeaseToken
+}
 
 type QuoteUpdateProcessorRepository interface {
 	TakeNextPendingUpdate(
 		ctx context.Context,
 		startedAt time.Time,
-	) (domain.QuoteUpdate, bool, error)
+	) (ClaimedQuoteUpdate, bool, error)
 
 	CompleteUpdate(
 		ctx context.Context,
+		claim ClaimedQuoteUpdate,
 		quote domain.Quote,
 		completedAt time.Time,
-	) error
+	) (bool, error)
 
 	FailUpdate(
 		ctx context.Context,
-		updateID uuid.UUID,
+		claim ClaimedQuoteUpdate,
 		message string,
 		failedAt time.Time,
-	) error
+	) (bool, error)
 }

@@ -321,7 +321,7 @@ func (r *QuoteUpdateRepository) GetLatest(
 func (r *QuoteUpdateRepository) TakeNextPendingUpdate(
 	ctx context.Context,
 	startedAt time.Time,
-) (domain.QuoteUpdate, bool, error) {
+) (service.ClaimedQuoteUpdate, bool, error) {
 	ctx, cancel := r.queryContext(ctx)
 	defer cancel()
 
@@ -338,7 +338,8 @@ func (r *QuoteUpdateRepository) TakeNextPendingUpdate(
 		SET
 			status = $1,
 			error_message = NULL,
-			updated_at = $2
+			updated_at = $2,
+			processing_version = processing_version + 1
 		FROM next_update
 		WHERE u.id = next_update.id
 		RETURNING
@@ -346,15 +347,17 @@ func (r *QuoteUpdateRepository) TakeNextPendingUpdate(
 			u.pair,
 			u.status,
 			u.created_at,
-			u.updated_at
+			u.updated_at,
+			u.processing_version
 	`
 
 	var (
-		id        string
-		pair      string
-		status    string
-		createdAt pgtype.Timestamptz
-		updatedAt pgtype.Timestamptz
+		id         string
+		pair       string
+		status     string
+		createdAt  pgtype.Timestamptz
+		updatedAt  pgtype.Timestamptz
+		leaseToken int64
 	)
 
 	err := r.database.QueryRow(
@@ -368,33 +371,45 @@ func (r *QuoteUpdateRepository) TakeNextPendingUpdate(
 		&status,
 		&createdAt,
 		&updatedAt,
+		&leaseToken,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.QuoteUpdate{}, false, nil
+		return service.ClaimedQuoteUpdate{}, false, nil
 	}
 	if err != nil {
-		return domain.QuoteUpdate{}, false, fmt.Errorf("take next pending quote update: %w", err)
+		return service.ClaimedQuoteUpdate{}, false, fmt.Errorf("take next pending quote update: %w", err)
 	}
 
 	parsedID, err := uuid.Parse(id)
 	if err != nil {
-		return domain.QuoteUpdate{}, false, fmt.Errorf("parse stored quote update id: %w", err)
+		return service.ClaimedQuoteUpdate{}, false, fmt.Errorf("parse stored quote update id: %w", err)
+	}
+	if leaseToken <= 0 {
+		return service.ClaimedQuoteUpdate{}, false, fmt.Errorf("take next pending quote update: invalid processing lease token %d", leaseToken)
 	}
 
-	return domain.QuoteUpdate{
-		ID:        parsedID,
-		Pair:      domain.Pair(pair),
-		Status:    domain.UpdateStatus(status),
-		CreatedAt: createdAt.Time,
-		UpdatedAt: updatedAt.Time,
+	return service.ClaimedQuoteUpdate{
+		Update: domain.QuoteUpdate{
+			ID:        parsedID,
+			Pair:      domain.Pair(pair),
+			Status:    domain.UpdateStatus(status),
+			CreatedAt: createdAt.Time,
+			UpdatedAt: updatedAt.Time,
+		},
+		LeaseToken: service.ProcessingLeaseToken(leaseToken),
 	}, true, nil
 }
 
 func (r *QuoteUpdateRepository) CompleteUpdate(
 	ctx context.Context,
+	claim service.ClaimedQuoteUpdate,
 	quote domain.Quote,
 	completedAt time.Time,
-) error {
+) (bool, error) {
+	if quote.UpdateID != claim.Update.ID || quote.Pair != claim.Update.Pair {
+		return false, errors.New("complete quote update: quote does not match processing claim")
+	}
+
 	ctx, cancel := r.queryContext(ctx)
 	defer cancel()
 
@@ -408,6 +423,7 @@ func (r *QuoteUpdateRepository) CompleteUpdate(
 			WHERE id = $1
 				AND status = $4
 				AND pair = $5
+				AND processing_version = $6
 			RETURNING id
 		)
 		INSERT INTO exchange_rates (
@@ -418,40 +434,38 @@ func (r *QuoteUpdateRepository) CompleteUpdate(
 		)
 		SELECT
 			id,
-			$6::numeric,
-			$7::date,
-			$8
+			$7::numeric,
+			$8::date,
+			$9
 		FROM completed_update
 	`
 
 	commandTag, err := r.database.Exec(
 		ctx,
 		query,
-		quote.UpdateID.String(),
+		claim.Update.ID.String(),
 		domain.UpdateCompleted,
 		completedAt,
 		domain.UpdateProcessing,
-		quote.Pair,
+		claim.Update.Pair,
+		int64(claim.LeaseToken),
 		string(quote.Rate),
 		quote.RateDate.Format(time.DateOnly),
 		quote.FetchedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("complete quote update: %w", err)
-	}
-	if commandTag.RowsAffected() != 1 {
-		return fmt.Errorf("complete quote update %s: update is not processing or pair does not match", quote.UpdateID)
+		return false, fmt.Errorf("complete quote update: %w", err)
 	}
 
-	return nil
+	return commandTag.RowsAffected() == 1, nil
 }
 
 func (r *QuoteUpdateRepository) FailUpdate(
 	ctx context.Context,
-	updateID uuid.UUID,
+	claim service.ClaimedQuoteUpdate,
 	message string,
 	failedAt time.Time,
-) error {
+) (bool, error) {
 	ctx, cancel := r.queryContext(ctx)
 	defer cancel()
 
@@ -463,25 +477,24 @@ func (r *QuoteUpdateRepository) FailUpdate(
 			updated_at = $4
 		WHERE id = $1
 			AND status = $5
+			AND processing_version = $6
 	`
 
 	commandTag, err := r.database.Exec(
 		ctx,
 		query,
-		updateID.String(),
+		claim.Update.ID.String(),
 		domain.UpdateFailed,
 		message,
 		failedAt,
 		domain.UpdateProcessing,
+		int64(claim.LeaseToken),
 	)
 	if err != nil {
-		return fmt.Errorf("fail quote update: %w", err)
-	}
-	if commandTag.RowsAffected() != 1 {
-		return fmt.Errorf("fail quote update %s: update is not processing", updateID)
+		return false, fmt.Errorf("fail quote update: %w", err)
 	}
 
-	return nil
+	return commandTag.RowsAffected() == 1, nil
 }
 
 func (r *QuoteUpdateRepository) RequeueStaleProcessingUpdates(

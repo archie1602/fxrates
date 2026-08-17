@@ -76,28 +76,29 @@ func (w *QuoteUpdateWorker) Run(ctx context.Context) error {
 }
 
 func (w *QuoteUpdateWorker) processNext(ctx context.Context) (bool, error) {
-	update, found, err := w.updates.TakeNextPendingUpdate(ctx, w.timeProvider.NowUTC())
+	claim, found, err := w.updates.TakeNextPendingUpdate(ctx, w.timeProvider.NowUTC())
 	if err != nil {
 		return false, fmt.Errorf("take pending quote update: %w", err)
 	}
 	if !found {
 		return false, nil
 	}
+	update := claim.Update
 
 	snapshot, err := w.rates.FetchRate(ctx, update.Pair)
 	if err != nil {
-		return true, w.failUpdate(ctx, update, fmt.Errorf("fetch rate: %w", err))
+		return true, w.failUpdate(ctx, claim, fmt.Errorf("fetch rate: %w", err))
 	}
 	if snapshot.Pair != update.Pair {
 		return true, w.failUpdate(
 			ctx,
-			update,
+			claim,
 			fmt.Errorf("provider returned pair %s for requested pair %s", snapshot.Pair, update.Pair),
 		)
 	}
 	validatedRate, err := domain.ParseRate(string(snapshot.Rate))
 	if err != nil {
-		return true, w.failUpdate(ctx, update, fmt.Errorf("provider returned an invalid rate: %w", err))
+		return true, w.failUpdate(ctx, claim, fmt.Errorf("provider returned an invalid rate: %w", err))
 	}
 
 	fetchedAt := w.timeProvider.NowUTC()
@@ -109,8 +110,17 @@ func (w *QuoteUpdateWorker) processNext(ctx context.Context) (bool, error) {
 		FetchedAt: fetchedAt,
 	}
 
-	if err := w.updates.CompleteUpdate(ctx, quote, fetchedAt); err != nil {
+	completed, err := w.updates.CompleteUpdate(ctx, claim, quote, fetchedAt)
+	if err != nil {
 		return true, fmt.Errorf("complete quote update %s: %w", update.ID, err)
+	}
+	if !completed {
+		w.logger.Warn(
+			"discarded quote update result because processing lease is stale",
+			"update_id", update.ID,
+			"lease_token", claim.LeaseToken,
+		)
+		return true, nil
 	}
 
 	w.logger.Info(
@@ -126,12 +136,13 @@ func (w *QuoteUpdateWorker) processNext(ctx context.Context) (bool, error) {
 
 func (w *QuoteUpdateWorker) failUpdate(
 	ctx context.Context,
-	update domain.QuoteUpdate,
+	claim ClaimedQuoteUpdate,
 	cause error,
 ) error {
-	markFailedErr := w.updates.FailUpdate(
+	update := claim.Update
+	failed, markFailedErr := w.updates.FailUpdate(
 		ctx,
-		update.ID,
+		claim,
 		cause.Error(),
 		w.timeProvider.NowUTC(),
 	)
@@ -140,6 +151,15 @@ func (w *QuoteUpdateWorker) failUpdate(
 			fmt.Errorf("process quote update %s: %w", update.ID, cause),
 			fmt.Errorf("mark quote update as failed: %w", markFailedErr),
 		)
+	}
+	if !failed {
+		w.logger.Warn(
+			"discarded quote update failure because processing lease is stale",
+			"update_id", update.ID,
+			"lease_token", claim.LeaseToken,
+			"cause", cause,
+		)
+		return nil
 	}
 
 	return fmt.Errorf("process quote update %s: %w", update.ID, cause)

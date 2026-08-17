@@ -33,12 +33,12 @@ CI (`.github/workflows/ci.yml`) additionally fails on any file that `gofmt -l` r
 
 1. `QuoteUpdateWorker` calls `TakeNextPendingUpdate`, a single CTE that claims one row with `FOR UPDATE SKIP LOCKED` and flips it to `processing`. Multiple instances can share the queue because of this.
 2. The Frankfurter call happens **after** that short transaction has committed — never hold a database transaction across the HTTP call.
-3. `CompleteUpdate` writes the `exchange_rates` row and flips the status in one statement, guarded by `status = 'processing' AND pair = $5`. `FailUpdate` is guarded by `status = 'processing'`. Both treat `RowsAffected() != 1` as an error, which is what makes a stolen/requeued row fail loudly instead of overwriting someone else's work.
+3. Every claim increments `processing_version`, which is returned to the worker as a fencing token. `CompleteUpdate` writes the `exchange_rates` row and flips the status in one statement; both completion and failure require the row to still be `processing` with the claimed version. A zero affected-row count means the lease is stale, so the worker discards its result instead of overwriting a newer claim.
 4. `QuoteUpdateRecoveryWorker` moves `processing` rows older than `PROCESSING_TIMEOUT` back to `pending`.
 
 This is at-least-once on purpose: a crash between the provider call and `CompleteUpdate` re-runs the provider `GET`. PostgreSQL is deliberately used as the durable queue instead of a Go channel or a broker — see the README for the reasoning. Keep this shape when changing the workers.
 
-**Config invariant:** `config.Validate` rejects a `PROCESSING_TIMEOUT` that does not exceed `FRANKFURTER_MAX_ATTEMPTS × FRANKFURTER_TIMEOUT` plus the delays between attempts (`processingTimeoutCoversRetries`). Recovery has no lease token, so a too-short timeout would let recovery reclaim work that is still in flight. Touching any of those four settings means re-checking that arithmetic.
+**Config invariant:** `config.Validate` rejects a `PROCESSING_TIMEOUT` that does not exceed `FRANKFURTER_MAX_ATTEMPTS × FRANKFURTER_TIMEOUT` plus the maximum delays between attempts (`processingTimeoutCoversRetries`). The fencing token prevents stale writes, while this timeout still avoids needlessly reclaiming active work. Touching any retry or processing-timeout setting means re-checking that arithmetic.
 
 ## Dependency direction
 
