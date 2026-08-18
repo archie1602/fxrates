@@ -1,4 +1,4 @@
-.PHONY: build run test test-integration fmt vet check migrate-create migrate-up migrate-down migrate-version docker-up docker-down docker-logs docker-ps
+.PHONY: build run test test-integration fmt vet vuln check migrate-create migrate-up migrate-down migrate-version docker-up docker-down docker-logs docker-ps
 
 build:
 	go build -o bin/fxrates ./cmd/api
@@ -32,8 +32,12 @@ fmt:
 vet:
 	go vet ./...
 
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
 check:
 	go mod verify
+	go mod tidy -diff
 	npx --yes @redocly/cli@2.46.0 lint openapi.yaml --skip-rule info-license-strict --skip-rule no-server-example.com
 	@unformatted="$$(git ls-files -z '*.go' | xargs -0 gofmt -l)"; \
 	if [ -n "$$unformatted" ]; then \
@@ -43,6 +47,7 @@ check:
 	fi
 	go vet ./...
 	go test -short -race ./...
+	go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
 migrate-create:
 	migrate create -ext sql -dir migrations -seq $(NAME)

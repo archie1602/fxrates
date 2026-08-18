@@ -24,6 +24,9 @@ jobs:
       - name: Verify modules
         run: go mod verify
 
+      - name: Verify module files are tidy
+        run: go mod tidy -diff
+
       - name: Validate OpenAPI
         run: >-
           npx --yes @redocly/cli@2.46.0 lint openapi.yaml
@@ -45,6 +48,12 @@ jobs:
 
       - name: Test
         run: go test -short -race ./...
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+
+      - name: Check vulnerabilities
+        run: govulncheck ./...
 
   integration:
     runs-on: ubuntu-24.04

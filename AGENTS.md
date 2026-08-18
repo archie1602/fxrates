@@ -13,7 +13,7 @@
 - `make build` compiles `./cmd/api` to `bin/fxrates`.
 - `make run` starts the API with the environment.
 - `make test` runs fast unit tests; `make fmt` formats Go source.
-- `make check` runs the fast CI checks: it verifies modules and OpenAPI, checks formatting, vets, and runs unit tests with the race detector.
+- `make check` mirrors CI: it verifies modules and OpenAPI, checks formatting, vets, runs unit tests with the race detector, and executes `govulncheck`.
 - `make test-integration` applies migrations and runs PostgreSQL integration tests. It requires `TEST_DATABASE_URL` to point to a disposable database whose name ends with `_test`.
 - `make docker-up` builds and starts PostgreSQL, migrations, and the API. Inspect them with `make docker-ps` and `make docker-logs`.
 - `make migrate-create NAME=add_field` creates a numbered migration. `make migrate-up` requires `DATABASE_URL`.
