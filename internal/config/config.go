@@ -22,6 +22,7 @@ const (
 	defaultWorkerPollInterval     = 500 * time.Millisecond
 	defaultRecoveryInterval       = 10 * time.Second
 	defaultProcessingTimeout      = 30 * time.Second
+	processingTimeoutSafetyMargin = 5 * time.Second
 	maxWorkerCount                = 32
 )
 
@@ -144,7 +145,10 @@ func (c Config) Validate() error {
 		return errors.New("RECOVERY_INTERVAL must be positive")
 	}
 	if !processingTimeoutCoversRetries(c) {
-		return errors.New("PROCESSING_TIMEOUT must exceed the maximum Frankfurter retry duration")
+		return fmt.Errorf(
+			"PROCESSING_TIMEOUT must cover the maximum Frankfurter retry duration plus a %s safety margin",
+			processingTimeoutSafetyMargin,
+		)
 	}
 
 	return nil
@@ -188,14 +192,19 @@ func intOrDefault(key string, fallback int) (int, error) {
 
 func processingTimeoutCoversRetries(c Config) bool {
 	remaining := c.ProcessingTimeout
+	if remaining < processingTimeoutSafetyMargin {
+		return false
+	}
+	remaining -= processingTimeoutSafetyMargin
+
 	for attempt := 1; attempt <= c.FrankfurterMaxAttempts; attempt++ {
-		if remaining <= c.FrankfurterTimeout {
+		if remaining < c.FrankfurterTimeout {
 			return false
 		}
 		remaining -= c.FrankfurterTimeout
 
 		if attempt < c.FrankfurterMaxAttempts {
-			if remaining <= c.FrankfurterMaxDelay {
+			if remaining < c.FrankfurterMaxDelay {
 				return false
 			}
 			remaining -= c.FrankfurterMaxDelay

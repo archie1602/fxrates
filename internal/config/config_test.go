@@ -58,6 +58,25 @@ func TestValidateRejectsInsufficientProcessingTimeout(t *testing.T) {
 	}
 }
 
+func TestValidateRequiresProcessingTimeoutSafetyMargin(t *testing.T) {
+	resetDurationEnvironment(t)
+	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("PROCESSING_TIMEOUT", "25s")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "safety margin") {
+		t.Fatalf("Validate error = %v, want safety margin error", err)
+	}
+
+	cfg.ProcessingTimeout = 30 * time.Second
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned unexpected error at the supported boundary: %v", err)
+	}
+}
+
 func TestValidateRejectsInvalidConfiguration(t *testing.T) {
 	tests := []struct {
 		name  string
