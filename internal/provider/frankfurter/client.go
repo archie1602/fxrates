@@ -20,6 +20,8 @@ const (
 	maxResponseBodyBytes = 64 << 10
 )
 
+var errResponseBodyTooLarge = errors.New("response body exceeds size limit")
+
 type Client struct {
 	httpClient *http.Client
 	baseURL    *url.URL
@@ -163,7 +165,15 @@ func (c *Client) fetchRateOnce(
 
 	body, err := readLimitedBody(response.Body)
 	if err != nil {
-		return service.RateSnapshot{}, fmt.Errorf("fetch Frankfurter rate: read response: %w", err)
+		err = fmt.Errorf("fetch Frankfurter rate: read response: %w", err)
+		if ctx.Err() != nil ||
+			errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, errResponseBodyTooLarge) {
+			return service.RateSnapshot{}, err
+		}
+
+		return service.RateSnapshot{}, &retryableError{err: err}
 	}
 
 	var payload rateResponse
@@ -232,7 +242,7 @@ func readLimitedBody(body io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	if len(data) > maxResponseBodyBytes {
-		return nil, fmt.Errorf("response body exceeds %d bytes", maxResponseBodyBytes)
+		return nil, fmt.Errorf("%w: limit is %d bytes", errResponseBodyTooLarge, maxResponseBodyBytes)
 	}
 
 	return data, nil

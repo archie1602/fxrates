@@ -3,6 +3,7 @@ package frankfurter_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -115,6 +116,107 @@ func TestClientFetchRateRetriesTransportError(t *testing.T) {
 	}
 }
 
+func TestClientFetchRateRetriesInterruptedResponseBody(t *testing.T) {
+	var attempts atomic.Int32
+	client, err := frankfurter.New(
+		&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempt := attempts.Add(1)
+			body := io.Reader(strings.NewReader(`{"date":"2026-08-07","base":"EUR","quote":"MXN","rate":19.909}`))
+			if attempt == 1 {
+				body = &interruptedReader{data: []byte(`{"date":"2026-08-07"`)}
+			}
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(body),
+				Header:     make(http.Header),
+			}, nil
+		})},
+		"https://example.test",
+		frankfurter.RetryPolicy{
+			MaxAttempts:  3,
+			InitialDelay: 0,
+			MaxDelay:     time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("frankfurter.New returned unexpected error: %v", err)
+	}
+
+	got, err := client.FetchRate(context.Background(), "EUR/MXN")
+	if err != nil {
+		t.Fatalf("FetchRate returned unexpected error: %v", err)
+	}
+	if got.Rate != "19.909" {
+		t.Errorf("FetchRate() rate = %q, want %q", got.Rate, "19.909")
+	}
+	if attempts.Load() != 2 {
+		t.Errorf("request attempts = %d, want 2", attempts.Load())
+	}
+}
+
+func TestClientFetchRateStopsAfterInterruptedResponseBodyRetries(t *testing.T) {
+	var attempts atomic.Int32
+	client, err := frankfurter.New(
+		&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(&interruptedReader{data: []byte(`{"date":"2026-08-07"`)}),
+				Header:     make(http.Header),
+			}, nil
+		})},
+		"https://example.test",
+		frankfurter.RetryPolicy{
+			MaxAttempts:  3,
+			InitialDelay: 0,
+			MaxDelay:     time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("frankfurter.New returned unexpected error: %v", err)
+	}
+
+	_, err = client.FetchRate(context.Background(), "EUR/MXN")
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("FetchRate() error = %v, want wrapped %v", err, io.ErrUnexpectedEOF)
+	}
+	if attempts.Load() != 3 {
+		t.Errorf("request attempts = %d, want 3", attempts.Load())
+	}
+}
+
+func TestClientFetchRateDoesNotRetryOversizedResponse(t *testing.T) {
+	var attempts atomic.Int32
+	client, err := frankfurter.New(
+		&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", 65<<10))),
+				Header:     make(http.Header),
+			}, nil
+		})},
+		"https://example.test",
+		frankfurter.RetryPolicy{
+			MaxAttempts:  3,
+			InitialDelay: 0,
+			MaxDelay:     time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("frankfurter.New returned unexpected error: %v", err)
+	}
+
+	_, err = client.FetchRate(context.Background(), "EUR/MXN")
+	if err == nil || !strings.Contains(err.Error(), "response body exceeds size limit") {
+		t.Fatalf("FetchRate() error = %v, want response size error", err)
+	}
+	if attempts.Load() != 1 {
+		t.Errorf("request attempts = %d, want 1", attempts.Load())
+	}
+}
+
 func TestClientFetchRateRejectsInvalidRate(t *testing.T) {
 	var attempts atomic.Int32
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -129,6 +231,53 @@ func TestClientFetchRateRejectsInvalidRate(t *testing.T) {
 	}
 	if attempts.Load() != 1 {
 		t.Errorf("request attempts = %d, want 1", attempts.Load())
+	}
+}
+
+func TestClientFetchRateRejectsInvalidSuccessfulResponse(t *testing.T) {
+	tests := []struct {
+		name         string
+		responseBody string
+		wantError    string
+	}{
+		{
+			name:         "malformed JSON",
+			responseBody: `{"date":`,
+			wantError:    "decode response",
+		},
+		{
+			name:         "multiple JSON values",
+			responseBody: `{"date":"2026-08-07","base":"EUR","quote":"MXN","rate":19.909} {}`,
+			wantError:    "one JSON object",
+		},
+		{
+			name:         "mismatched pair",
+			responseBody: `{"date":"2026-08-07","base":"USD","quote":"MXN","rate":19.909}`,
+			wantError:    "does not match requested pair",
+		},
+		{
+			name:         "invalid date",
+			responseBody: `{"date":"2026-02-30","base":"EUR","quote":"MXN","rate":19.909}`,
+			wantError:    "parse rate date",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts.Add(1)
+				_, _ = w.Write([]byte(test.responseBody))
+			}))
+
+			_, err := client.FetchRate(context.Background(), "EUR/MXN")
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("FetchRate() error = %v, want error containing %q", err, test.wantError)
+			}
+			if attempts.Load() != 1 {
+				t.Errorf("request attempts = %d, want 1", attempts.Load())
+			}
+		})
 	}
 }
 
@@ -208,4 +357,18 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
+}
+
+type interruptedReader struct {
+	data []byte
+}
+
+func (r *interruptedReader) Read(buffer []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.ErrUnexpectedEOF
+	}
+
+	n := copy(buffer, r.data)
+	r.data = r.data[n:]
+	return n, nil
 }
