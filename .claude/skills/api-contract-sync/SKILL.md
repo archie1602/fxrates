@@ -35,9 +35,10 @@ method can return, and `internal/domain` owns the currency and status enums.
    `omitempty` must be absent from `required`; every other field must be
    present in it, and a pointer among them must be `nullable: true`, because
    `encoding/json` still emits it as `null`.
-5. The `Location` header set in `createQuoteUpdate` is documented on the 202,
-   and `additionalProperties: false` on the request schema still matches
-   `DisallowUnknownFields()`.
+5. The `Location` header set in `createQuoteUpdate` is documented on both 200
+   replay and 202 creation responses, `Idempotency-Replayed` is documented on
+   the replay, and `additionalProperties: false` on the request schema still
+   matches `DisallowUnknownFields()`.
 6. The `CurrencyPair` and `UpdateStatus` enums match `supportedCurrencies` in
    `domain/pair.go` and the `UpdateStatus` constants in `domain/quote.go`.
 7. `api.http` targets routes that exist, with headers the handlers accept.
@@ -49,13 +50,15 @@ Truth is `internal/config/config.go`.
 8. Every key read through `os.Getenv` in `Load` appears in `.env.example` and
    in `app.environment` in `compose.yaml`. A key compose hardcodes as a
    literal instead of `${VAR:-value}` is not overridable through `.env`,
-   whatever `.env.example` implies - say so when you find one.
+   whatever `.env.example` implies - say so when you find one unless the key
+   is explicitly documented as local-only outside Compose.
 9. Each `default*` constant matches both the compose fallback and the value
    in `.env.example`.
 10. Every bound `Validate` enforces is stated where the setting is declared,
     as a comment in `.env.example`, not only in prose in `README.md`. That
     covers the `FRANKFURTER_MAX_ATTEMPTS` range and the rule that
-    `PROCESSING_TIMEOUT` must exceed the whole Frankfurter retry window.
+    `PROCESSING_TIMEOUT` must cover the whole Frankfurter retry window plus
+    the configured safety margin.
 
 ## Verify
 

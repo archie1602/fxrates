@@ -12,9 +12,9 @@ Review the `.up.sql` and `.down.sql` pair matching `$ARGUMENTS` in
 identifies the pair. Without an argument, review the pair with the highest
 sequence number.
 
-This project has no PostgreSQL integration suite, so a migration is only ever
-checked by reading it. Be concrete: quote the statement you object to and say
-what it does at runtime.
+This project has a PostgreSQL integration suite. Review the migration statically first, then
+identify which existing integration scenarios cover it and which migration-specific behavior
+still needs a test. Be concrete: quote the statement you object to and say what it does at runtime.
 
 ## Reversibility
 

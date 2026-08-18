@@ -8,7 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 make test                                  # go test -short ./...
-make check                                 # fast CI checks, including short race tests
+make check                                 # CI checks, short race tests, and govulncheck
+make vuln                                  # govulncheck only
 TEST_DATABASE_URL=postgres://.../fxrates_test?sslmode=disable make test-integration
 go test ./internal/service -run TestQuoteUpdateWorkerProcessesPendingUpdate -v   # single test
 make vet                                   # go vet ./...
@@ -30,16 +31,16 @@ CI (`.github/workflows/ci.yml`) additionally fails on any file that `gofmt -l` r
 
 ## Request lifecycle
 
-`POST /api/v1/quote-updates` never calls the upstream provider. It validates, inserts a `pending` row, and returns `202` with the id. Everything else happens in background goroutines started alongside the HTTP server by an `errgroup` in `cmd/api/main.go`:
+`POST /api/v1/quote-updates` never calls the upstream provider. It validates and inserts a `pending` row. A new row returns `202`; an idempotent replay returns `200` and `Idempotency-Replayed: true`. Everything else happens in background goroutines started alongside the HTTP server by an `errgroup` in `cmd/api/main.go`:
 
 1. `QuoteUpdateWorker` calls `TakeNextPendingUpdate`, a single CTE that claims one row with `FOR UPDATE SKIP LOCKED` and flips it to `processing`. Multiple instances can share the queue because of this.
 2. The Frankfurter call happens **after** that short transaction has committed — never hold a database transaction across the HTTP call.
 3. Every claim increments `processing_version`, which is returned to the worker as a fencing token. `CompleteUpdate` writes the `exchange_rates` row and flips the status in one statement; both completion and failure require the row to still be `processing` with the claimed version. A zero affected-row count means the lease is stale, so the worker discards its result instead of overwriting a newer claim.
-4. `QuoteUpdateRecoveryWorker` moves `processing` rows older than `PROCESSING_TIMEOUT` back to `pending`.
+4. `QuoteUpdateRecoveryWorker` moves `processing` rows older than `PROCESSING_TIMEOUT` back to `pending`. Queue lifecycle timestamps and stale comparisons come from PostgreSQL, not application clocks.
 
 This is at-least-once on purpose: a crash between the provider call and `CompleteUpdate` re-runs the provider `GET`. PostgreSQL is deliberately used as the durable queue instead of a Go channel or a broker — see the README for the reasoning. Keep this shape when changing the workers.
 
-**Config invariant:** `config.Validate` rejects a `PROCESSING_TIMEOUT` that does not exceed `FRANKFURTER_MAX_ATTEMPTS × FRANKFURTER_TIMEOUT` plus the maximum delays between attempts (`processingTimeoutCoversRetries`). The fencing token prevents stale writes, while this timeout still avoids needlessly reclaiming active work. Touching any retry or processing-timeout setting means re-checking that arithmetic.
+**Config invariant:** `config.Validate` rejects a `PROCESSING_TIMEOUT` that does not cover `FRANKFURTER_MAX_ATTEMPTS × FRANKFURTER_TIMEOUT`, the maximum delays between attempts, and the configured safety margin (`processingTimeoutCoversRetries`). The fencing token prevents stale writes, while this timeout still avoids needlessly reclaiming active work. Touching any retry or processing-timeout setting means re-checking that arithmetic.
 
 ## Dependency direction
 
@@ -48,7 +49,7 @@ This is at-least-once on purpose: a crash between the provider call and `Complet
 ## Domain invariants
 
 - `domain.Rate` is a validated decimal **string**, never a float. `ParseRate` enforces what `numeric(30, 12)` can hold exactly, and it is applied in both directions — on values coming from Frankfurter and on values read back out of PostgreSQL.
-- `domain.ParsePair` normalizes and restricts the pair to `USD`/`EUR`/`MXN`. The `quote_updates` CHECK constraints mirror the format independently. Adding a currency means updating `internal/domain/pair.go`, `openapi.yaml`, and the README together.
+- `domain.ParsePair` normalizes and restricts the pair to `USD`/`EUR`/`MXN`. The `quote_updates` CHECK constraint independently enforces the same six ordered pairs. Adding a currency means updating `internal/domain/pair.go`, the migration constraint, `openapi.yaml`, and the README together.
 - Service-level failures are sentinel errors (`ErrQuoteUpdateNotFound`, `ErrQuoteNotFound`, `ErrIdempotencyKeyConflict`) mapped to status codes in one place, `Handler.writeServiceError`. A new failure mode needs a sentinel, a case there, and an `openapi.yaml` entry; everything unmapped becomes a logged `500`.
 - Idempotency lives in `CreateOrGet`: `ON CONFLICT (idempotency_key) DO NOTHING ... RETURNING`, then a fallback select on conflict. The service compares the stored pair with the requested one and returns `ErrIdempotencyKeyConflict` (→ 422) if they differ.
 - Every repository method wraps the caller's context with `DATABASE_QUERY_TIMEOUT` via `queryContext`.
