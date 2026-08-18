@@ -25,10 +25,9 @@ func TestQuoteServiceCreateQuoteUpdate(t *testing.T) {
 		UpdatedAt: now,
 	}
 
-	repository := &quoteUpdateRepositoryStub{}
+	repository := &quoteUpdateRepositoryStub{storedUpdate: want}
 	quoteService := service.NewQuoteService(
 		repository,
-		fixedTimeProvider{now: now},
 		uuidGeneratorStub{id: updateID},
 	)
 
@@ -36,11 +35,17 @@ func TestQuoteServiceCreateQuoteUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateQuoteUpdate returned unexpected error: %v", err)
 	}
-	if got != want {
-		t.Errorf("CreateQuoteUpdate() = %+v, want %+v", got, want)
+	if got.Update != want {
+		t.Errorf("CreateQuoteUpdate() update = %+v, want %+v", got.Update, want)
 	}
-	if repository.createdUpdate != want {
-		t.Errorf("stored update = %+v, want %+v", repository.createdUpdate, want)
+	if !got.Created {
+		t.Error("CreateQuoteUpdate() reported an idempotency replay for a new update")
+	}
+	if repository.createdID != updateID {
+		t.Errorf("stored update ID = %s, want %s", repository.createdID, updateID)
+	}
+	if repository.createdPair != pair {
+		t.Errorf("stored pair = %q, want %q", repository.createdPair, pair)
 	}
 	if repository.idempotencyKey == nil || *repository.idempotencyKey != idempotencyKey {
 		t.Errorf("stored idempotency key = %v, want %v", repository.idempotencyKey, idempotencyKey)
@@ -57,8 +62,7 @@ func TestQuoteServiceCreateQuoteUpdateWithExistingIdempotencyKey(t *testing.T) {
 
 	t.Run("returns existing update for the same pair", func(t *testing.T) {
 		quoteService := service.NewQuoteService(
-			&quoteUpdateRepositoryStub{storedUpdate: existing},
-			fixedTimeProvider{},
+			&quoteUpdateRepositoryStub{storedUpdate: existing, replayed: true},
 			uuidGeneratorStub{id: uuid.MustParse("01900000-0000-7000-8000-000000000002")},
 		)
 
@@ -70,15 +74,17 @@ func TestQuoteServiceCreateQuoteUpdateWithExistingIdempotencyKey(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateQuoteUpdate returned unexpected error: %v", err)
 		}
-		if got != existing {
-			t.Errorf("CreateQuoteUpdate() = %+v, want %+v", got, existing)
+		if got.Update != existing {
+			t.Errorf("CreateQuoteUpdate() update = %+v, want %+v", got.Update, existing)
+		}
+		if got.Created {
+			t.Error("CreateQuoteUpdate() reported a replayed update as newly created")
 		}
 	})
 
 	t.Run("rejects the same key for another pair", func(t *testing.T) {
 		quoteService := service.NewQuoteService(
-			&quoteUpdateRepositoryStub{storedUpdate: existing},
-			fixedTimeProvider{},
+			&quoteUpdateRepositoryStub{storedUpdate: existing, replayed: true},
 			uuidGeneratorStub{id: uuid.MustParse("01900000-0000-7000-8000-000000000002")},
 		)
 
@@ -120,7 +126,6 @@ func TestQuoteServiceCreateQuoteUpdateErrors(t *testing.T) {
 			repository := &quoteUpdateRepositoryStub{createErr: test.repositoryErr}
 			quoteService := service.NewQuoteService(
 				repository,
-				fixedTimeProvider{},
 				uuidGeneratorStub{
 					id:  uuid.MustParse("01900000-0000-7000-8000-000000000001"),
 					err: test.generatorErr,
@@ -133,6 +138,35 @@ func TestQuoteServiceCreateQuoteUpdateErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestQuoteServiceCreateQuoteUpdateValidatesDomainValues(t *testing.T) {
+	t.Run("rejects unsupported pair", func(t *testing.T) {
+		quoteService := service.NewQuoteService(
+			&quoteUpdateRepositoryStub{},
+			uuidGeneratorStub{id: uuid.MustParse("01900000-0000-7000-8000-000000000001")},
+		)
+
+		_, err := quoteService.CreateQuoteUpdate(context.Background(), "EUR/GBP", nil)
+		if !errors.Is(err, domain.ErrUnsupportedCurrency) {
+			t.Fatalf("CreateQuoteUpdate() error = %v, want %v", err, domain.ErrUnsupportedCurrency)
+		}
+	})
+
+	t.Run("rejects zero generated UUID", func(t *testing.T) {
+		quoteService := service.NewQuoteService(
+			&quoteUpdateRepositoryStub{},
+			uuidGeneratorStub{id: uuid.Nil},
+		)
+
+		if _, err := quoteService.CreateQuoteUpdate(
+			context.Background(),
+			"EUR/MXN",
+			nil,
+		); err == nil {
+			t.Fatal("CreateQuoteUpdate() returned nil error for a zero generated UUID")
+		}
+	})
 }
 
 func TestQuoteServiceGetQuoteUpdate(t *testing.T) {
@@ -155,7 +189,7 @@ func TestQuoteServiceGetQuoteUpdate(t *testing.T) {
 			getByIDResult: want,
 			getByIDFound:  true,
 		}
-		quoteService := service.NewQuoteService(repository, fixedTimeProvider{}, uuidGeneratorStub{})
+		quoteService := service.NewQuoteService(repository, uuidGeneratorStub{})
 
 		got, err := quoteService.GetQuoteUpdate(context.Background(), updateID)
 		if err != nil {
@@ -169,7 +203,6 @@ func TestQuoteServiceGetQuoteUpdate(t *testing.T) {
 	t.Run("returns not found error", func(t *testing.T) {
 		quoteService := service.NewQuoteService(
 			&quoteUpdateRepositoryStub{},
-			fixedTimeProvider{},
 			uuidGeneratorStub{},
 		)
 
@@ -195,7 +228,7 @@ func TestQuoteServiceGetLatest(t *testing.T) {
 			getLatestQuote: want,
 			getLatestFound: true,
 		}
-		quoteService := service.NewQuoteService(repository, fixedTimeProvider{}, uuidGeneratorStub{})
+		quoteService := service.NewQuoteService(repository, uuidGeneratorStub{})
 
 		got, err := quoteService.GetLatest(context.Background(), pair)
 		if err != nil {
@@ -209,7 +242,6 @@ func TestQuoteServiceGetLatest(t *testing.T) {
 	t.Run("returns not found error", func(t *testing.T) {
 		quoteService := service.NewQuoteService(
 			&quoteUpdateRepositoryStub{},
-			fixedTimeProvider{},
 			uuidGeneratorStub{},
 		)
 
@@ -221,8 +253,10 @@ func TestQuoteServiceGetLatest(t *testing.T) {
 }
 
 type quoteUpdateRepositoryStub struct {
-	createdUpdate  domain.QuoteUpdate
+	createdID      uuid.UUID
+	createdPair    domain.Pair
 	storedUpdate   domain.QuoteUpdate
+	replayed       bool
 	idempotencyKey *uuid.UUID
 	createErr      error
 	getByIDResult  domain.QuoteUpdateResult
@@ -233,19 +267,25 @@ type quoteUpdateRepositoryStub struct {
 
 func (s *quoteUpdateRepositoryStub) CreateOrGet(
 	_ context.Context,
-	update domain.QuoteUpdate,
+	updateID uuid.UUID,
+	pair domain.Pair,
 	idempotencyKey *uuid.UUID,
-) (domain.QuoteUpdate, error) {
-	s.createdUpdate = update
+) (domain.QuoteUpdate, bool, error) {
+	s.createdID = updateID
+	s.createdPair = pair
 	s.idempotencyKey = idempotencyKey
 	if s.createErr != nil {
-		return domain.QuoteUpdate{}, s.createErr
+		return domain.QuoteUpdate{}, false, s.createErr
 	}
 	if s.storedUpdate.ID != uuid.Nil {
-		return s.storedUpdate, nil
+		return s.storedUpdate, !s.replayed, nil
 	}
 
-	return update, nil
+	return domain.QuoteUpdate{
+		ID:     updateID,
+		Pair:   pair,
+		Status: domain.UpdatePending,
+	}, true, nil
 }
 
 func (s *quoteUpdateRepositoryStub) GetByID(
@@ -260,14 +300,6 @@ func (s *quoteUpdateRepositoryStub) GetLatest(
 	domain.Pair,
 ) (domain.Quote, bool, error) {
 	return s.getLatestQuote, s.getLatestFound, nil
-}
-
-type fixedTimeProvider struct {
-	now time.Time
-}
-
-func (p fixedTimeProvider) NowUTC() time.Time {
-	return p.now
 }
 
 type uuidGeneratorStub struct {

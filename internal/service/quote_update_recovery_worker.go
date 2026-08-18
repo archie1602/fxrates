@@ -10,14 +10,12 @@ import (
 type QuoteUpdateRecoveryRepository interface {
 	RequeueStaleProcessingUpdates(
 		ctx context.Context,
-		staleBefore time.Time,
-		requeuedAt time.Time,
+		processingTimeout time.Duration,
 	) (int64, error)
 }
 
 type QuoteUpdateRecoveryWorker struct {
 	updates           QuoteUpdateRecoveryRepository
-	timeProvider      TimeProvider
 	logger            *slog.Logger
 	recoveryInterval  time.Duration
 	processingTimeout time.Duration
@@ -25,16 +23,12 @@ type QuoteUpdateRecoveryWorker struct {
 
 func NewQuoteUpdateRecoveryWorker(
 	updates QuoteUpdateRecoveryRepository,
-	timeProvider TimeProvider,
 	logger *slog.Logger,
 	recoveryInterval time.Duration,
 	processingTimeout time.Duration,
 ) (*QuoteUpdateRecoveryWorker, error) {
 	if updates == nil {
 		return nil, errors.New("create quote update recovery worker: update repository is required")
-	}
-	if timeProvider == nil {
-		return nil, errors.New("create quote update recovery worker: time provider is required")
 	}
 	if logger == nil {
 		return nil, errors.New("create quote update recovery worker: logger is required")
@@ -48,7 +42,6 @@ func NewQuoteUpdateRecoveryWorker(
 
 	return &QuoteUpdateRecoveryWorker{
 		updates:           updates,
-		timeProvider:      timeProvider,
 		logger:            logger,
 		recoveryInterval:  recoveryInterval,
 		processingTimeout: processingTimeout,
@@ -76,12 +69,7 @@ func (w *QuoteUpdateRecoveryWorker) Run(ctx context.Context) error {
 }
 
 func (w *QuoteUpdateRecoveryWorker) requeueStaleUpdates(ctx context.Context) {
-	now := w.timeProvider.NowUTC()
-	requeued, err := w.updates.RequeueStaleProcessingUpdates(
-		ctx,
-		now.Add(-w.processingTimeout),
-		now,
-	)
+	requeued, err := w.updates.RequeueStaleProcessingUpdates(ctx, w.processingTimeout)
 	if err != nil {
 		if ctx.Err() == nil {
 			w.logger.Error("failed to recover stale quote updates", "error", err)

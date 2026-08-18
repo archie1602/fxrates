@@ -19,27 +19,30 @@ var (
 type QuoteUpdateRepository interface {
 	CreateOrGet(
 		ctx context.Context,
-		update domain.QuoteUpdate,
+		updateID uuid.UUID,
+		pair domain.Pair,
 		idempotencyKey *uuid.UUID,
-	) (domain.QuoteUpdate, error)
+	) (domain.QuoteUpdate, bool, error)
 	GetByID(ctx context.Context, updateID uuid.UUID) (domain.QuoteUpdateResult, bool, error)
 	GetLatest(ctx context.Context, pair domain.Pair) (domain.Quote, bool, error)
 }
 
 type QuoteService struct {
 	updates       QuoteUpdateRepository
-	timeProvider  TimeProvider
 	uuidGenerator UUIDGenerator
+}
+
+type CreateQuoteUpdateResult struct {
+	Update  domain.QuoteUpdate
+	Created bool
 }
 
 func NewQuoteService(
 	updates QuoteUpdateRepository,
-	timeProvider TimeProvider,
 	uuidGenerator UUIDGenerator,
 ) *QuoteService {
 	return &QuoteService{
 		updates:       updates,
-		timeProvider:  timeProvider,
 		uuidGenerator: uuidGenerator,
 	}
 }
@@ -48,30 +51,29 @@ func (s *QuoteService) CreateQuoteUpdate(
 	ctx context.Context,
 	pair domain.Pair,
 	idempotencyKey *uuid.UUID,
-) (domain.QuoteUpdate, error) {
+) (CreateQuoteUpdateResult, error) {
+	validatedPair, err := domain.ParsePair(string(pair))
+	if err != nil {
+		return CreateQuoteUpdateResult{}, fmt.Errorf("validate quote update pair: %w", err)
+	}
+
 	id, err := s.uuidGenerator.New()
 	if err != nil {
-		return domain.QuoteUpdate{}, fmt.Errorf("generate quote update id: %w", err)
+		return CreateQuoteUpdateResult{}, fmt.Errorf("generate quote update id: %w", err)
+	}
+	if id == uuid.Nil {
+		return CreateQuoteUpdateResult{}, errors.New("generate quote update id: generator returned a zero UUID")
 	}
 
-	now := s.timeProvider.NowUTC()
-	update := domain.QuoteUpdate{
-		ID:        id,
-		Pair:      pair,
-		Status:    domain.UpdatePending,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-
-	stored, err := s.updates.CreateOrGet(ctx, update, idempotencyKey)
+	stored, created, err := s.updates.CreateOrGet(ctx, id, validatedPair, idempotencyKey)
 	if err != nil {
-		return domain.QuoteUpdate{}, fmt.Errorf("create quote update: %w", err)
+		return CreateQuoteUpdateResult{}, fmt.Errorf("create quote update: %w", err)
 	}
-	if stored.Pair != pair {
-		return domain.QuoteUpdate{}, ErrIdempotencyKeyConflict
+	if stored.Pair != validatedPair {
+		return CreateQuoteUpdateResult{}, ErrIdempotencyKeyConflict
 	}
 
-	return stored, nil
+	return CreateQuoteUpdateResult{Update: stored, Created: created}, nil
 }
 
 func (s *QuoteService) GetQuoteUpdate(ctx context.Context, updateID uuid.UUID) (domain.QuoteUpdateResult, error) {

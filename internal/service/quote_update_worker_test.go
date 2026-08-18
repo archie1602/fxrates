@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"strings"
 	"testing"
 	"time"
 
@@ -63,9 +62,6 @@ func TestQuoteUpdateWorkerProcessesPendingUpdate(t *testing.T) {
 	if repository.completedClaim.LeaseToken != testLeaseToken {
 		t.Errorf("completion lease token = %d, want %d", repository.completedClaim.LeaseToken, testLeaseToken)
 	}
-	if repository.completedAt != now {
-		t.Errorf("completion time = %v, want %v", repository.completedAt, now)
-	}
 }
 
 func TestQuoteUpdateWorkerMarksProviderFailure(t *testing.T) {
@@ -101,11 +97,11 @@ func TestQuoteUpdateWorkerMarksProviderFailure(t *testing.T) {
 	if repository.failedClaim.LeaseToken != testLeaseToken {
 		t.Errorf("failure lease token = %d, want %d", repository.failedClaim.LeaseToken, testLeaseToken)
 	}
-	if !strings.Contains(repository.failureMessage, providerErr.Error()) {
-		t.Errorf("failure message = %q, want it to contain %q", repository.failureMessage, providerErr)
+	if repository.failure.Code != domain.UpdateFailureRateProvider {
+		t.Errorf("failure code = %q, want %q", repository.failure.Code, domain.UpdateFailureRateProvider)
 	}
-	if repository.failedAt != now {
-		t.Errorf("failure time = %v, want %v", repository.failedAt, now)
+	if repository.failure.Message != rateProviderFailureMessage {
+		t.Errorf("failure message = %q, want %q", repository.failure.Message, rateProviderFailureMessage)
 	}
 	if repository.completeCalled {
 		t.Error("CompleteUpdate was called for a failed update")
@@ -210,13 +206,55 @@ func TestQuoteUpdateWorkerDiscardsFailureForStaleClaim(t *testing.T) {
 	}
 }
 
-func TestQuoteUpdateRecoveryWorkerCalculatesStaleThreshold(t *testing.T) {
-	now := time.Date(2026, time.August, 7, 12, 30, 0, 0, time.UTC)
+func TestQuoteUpdateWorkerClassifiesRepositoryErrorsAsInfrastructureFailures(t *testing.T) {
+	repositoryErr := errors.New("database unavailable")
+	worker, err := NewQuoteUpdateWorker(
+		&processorRepositoryStub{takeErr: repositoryErr},
+		&rateProviderStub{},
+		fixedClock{},
+		discardLogger(),
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("NewQuoteUpdateWorker returned unexpected error: %v", err)
+	}
+
+	_, err = worker.processNext(context.Background())
+	var infrastructureErr *workerInfrastructureError
+	if !errors.As(err, &infrastructureErr) {
+		t.Fatalf("processNext error = %v, want workerInfrastructureError", err)
+	}
+	if !errors.Is(err, repositoryErr) {
+		t.Fatalf("processNext error = %v, want wrapped %v", err, repositoryErr)
+	}
+}
+
+func TestWorkerInfrastructureBackoffIsBounded(t *testing.T) {
+	const base = time.Second
+
+	for range 100 {
+		first := workerInfrastructureBackoff(base, 1)
+		if first < base/2 || first > base {
+			t.Fatalf("first backoff = %v, want between %v and %v", first, base/2, base)
+		}
+
+		capped := workerInfrastructureBackoff(base, 10)
+		if capped < maxWorkerInfrastructureBackoff/2 || capped > maxWorkerInfrastructureBackoff {
+			t.Fatalf(
+				"capped backoff = %v, want between %v and %v",
+				capped,
+				maxWorkerInfrastructureBackoff/2,
+				maxWorkerInfrastructureBackoff,
+			)
+		}
+	}
+}
+
+func TestQuoteUpdateRecoveryWorkerPassesProcessingTimeout(t *testing.T) {
 	processingTimeout := 30 * time.Second
 	repository := &recoveryRepositoryStub{}
 	worker, err := NewQuoteUpdateRecoveryWorker(
 		repository,
-		fixedClock{now: now},
 		discardLogger(),
 		time.Minute,
 		processingTimeout,
@@ -227,11 +265,8 @@ func TestQuoteUpdateRecoveryWorkerCalculatesStaleThreshold(t *testing.T) {
 
 	worker.requeueStaleUpdates(context.Background())
 
-	if repository.staleBefore != now.Add(-processingTimeout) {
-		t.Errorf("stale threshold = %v, want %v", repository.staleBefore, now.Add(-processingTimeout))
-	}
-	if repository.requeuedAt != now {
-		t.Errorf("requeue time = %v, want %v", repository.requeuedAt, now)
+	if repository.processingTimeout != processingTimeout {
+		t.Errorf("processing timeout = %v, want %v", repository.processingTimeout, processingTimeout)
 	}
 }
 
@@ -240,48 +275,42 @@ type processorRepositoryStub struct {
 	found           bool
 	completedClaim  ClaimedQuoteUpdate
 	completedQuote  domain.Quote
-	completedAt     time.Time
 	completeCalled  bool
 	staleCompletion bool
 	failedClaim     ClaimedQuoteUpdate
 	failedID        uuid.UUID
-	failureMessage  string
-	failedAt        time.Time
+	failure         QuoteUpdateFailure
 	staleFailure    bool
+	takeErr         error
 }
 
 const testLeaseToken ProcessingLeaseToken = 7
 
 func (s *processorRepositoryStub) TakeNextPendingUpdate(
 	context.Context,
-	time.Time,
 ) (ClaimedQuoteUpdate, bool, error) {
-	return ClaimedQuoteUpdate{Update: s.update, LeaseToken: testLeaseToken}, s.found, nil
+	return ClaimedQuoteUpdate{Update: s.update, LeaseToken: testLeaseToken}, s.found, s.takeErr
 }
 
 func (s *processorRepositoryStub) CompleteUpdate(
 	_ context.Context,
 	claim ClaimedQuoteUpdate,
 	quote domain.Quote,
-	completedAt time.Time,
 ) (bool, error) {
 	s.completeCalled = true
 	s.completedClaim = claim
 	s.completedQuote = quote
-	s.completedAt = completedAt
 	return !s.staleCompletion, nil
 }
 
 func (s *processorRepositoryStub) FailUpdate(
 	_ context.Context,
 	claim ClaimedQuoteUpdate,
-	message string,
-	failedAt time.Time,
+	failure QuoteUpdateFailure,
 ) (bool, error) {
 	s.failedClaim = claim
 	s.failedID = claim.Update.ID
-	s.failureMessage = message
-	s.failedAt = failedAt
+	s.failure = failure
 	return !s.staleFailure, nil
 }
 
@@ -297,17 +326,14 @@ func (s *rateProviderStub) FetchRate(_ context.Context, pair domain.Pair) (RateS
 }
 
 type recoveryRepositoryStub struct {
-	staleBefore time.Time
-	requeuedAt  time.Time
+	processingTimeout time.Duration
 }
 
 func (s *recoveryRepositoryStub) RequeueStaleProcessingUpdates(
 	_ context.Context,
-	staleBefore time.Time,
-	requeuedAt time.Time,
+	processingTimeout time.Duration,
 ) (int64, error) {
-	s.staleBefore = staleBefore
-	s.requeuedAt = requeuedAt
+	s.processingTimeout = processingTimeout
 	return 0, nil
 }
 

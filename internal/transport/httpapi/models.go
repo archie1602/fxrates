@@ -16,14 +16,15 @@ type updateResponseDTO struct {
 }
 
 type quoteUpdateResponseDTO struct {
-	UpdateID     string              `json:"update_id"`
-	Pair         domain.Pair         `json:"pair"`
-	Status       domain.UpdateStatus `json:"status"`
-	UpdatedAt    time.Time           `json:"updated_at"`
-	ErrorMessage *string             `json:"error_message,omitempty"`
-	Rate         *domain.Rate        `json:"rate"`
-	RateDate     *string             `json:"rate_date"`
-	FetchedAt    *time.Time          `json:"fetched_at"`
+	UpdateID     string                    `json:"update_id"`
+	Pair         domain.Pair               `json:"pair"`
+	Status       domain.UpdateStatus       `json:"status"`
+	UpdatedAt    time.Time                 `json:"updated_at"`
+	FailureCode  *domain.UpdateFailureCode `json:"failure_code,omitempty"`
+	ErrorMessage *string                   `json:"error_message,omitempty"`
+	Rate         *domain.Rate              `json:"rate"`
+	RateDate     *string                   `json:"rate_date"`
+	FetchedAt    *time.Time                `json:"fetched_at"`
 }
 
 type quoteResponseDTO struct {
@@ -63,8 +64,11 @@ func mapQuoteUpdateResultToDTO(result domain.QuoteUpdateResult) quoteUpdateRespo
 		Status:    result.Update.Status,
 		UpdatedAt: result.Update.UpdatedAt,
 	}
-	if result.Update.Error != "" {
-		response.ErrorMessage = &result.Update.Error
+	if result.Update.FailureCode != "" {
+		response.FailureCode = &result.Update.FailureCode
+	}
+	if result.Update.FailureMessage != "" {
+		response.ErrorMessage = &result.Update.FailureMessage
 	}
 
 	if result.Quote != nil {

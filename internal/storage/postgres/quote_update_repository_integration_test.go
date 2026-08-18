@@ -16,12 +16,12 @@ import (
 
 func TestIntegrationCreateOrGetConcurrentSameIdempotencyKey(t *testing.T) {
 	repository := integrationRepository(t)
-	createdAt := integrationTime(0)
 	idempotencyKey := integrationUUID(100)
 
 	type result struct {
-		update domain.QuoteUpdate
-		err    error
+		update  domain.QuoteUpdate
+		created bool
+		err     error
 	}
 
 	const callerCount = 16
@@ -31,17 +31,18 @@ func TestIntegrationCreateOrGetConcurrentSameIdempotencyKey(t *testing.T) {
 	callers.Add(callerCount)
 
 	for caller := 1; caller <= callerCount; caller++ {
-		update := pendingIntegrationUpdate(caller, "EUR/MXN", createdAt)
+		updateID := integrationUUID(caller)
 		go func() {
 			defer callers.Done()
 			<-start
 
-			stored, err := repository.CreateOrGet(
+			stored, created, err := repository.CreateOrGet(
 				context.Background(),
-				update,
+				updateID,
+				"EUR/MXN",
 				&idempotencyKey,
 			)
-			results <- result{update: stored, err: err}
+			results <- result{update: stored, created: created, err: err}
 		}()
 	}
 
@@ -50,9 +51,13 @@ func TestIntegrationCreateOrGetConcurrentSameIdempotencyKey(t *testing.T) {
 	close(results)
 
 	var storedID uuid.UUID
+	createdCount := 0
 	for result := range results {
 		if result.err != nil {
 			t.Fatalf("CreateOrGet returned an error: %v", result.err)
+		}
+		if result.created {
+			createdCount++
 		}
 		if storedID == uuid.Nil {
 			storedID = result.update.ID
@@ -61,6 +66,9 @@ func TestIntegrationCreateOrGetConcurrentSameIdempotencyKey(t *testing.T) {
 		if result.update.ID != storedID {
 			t.Errorf("stored update ID = %s, want %s", result.update.ID, storedID)
 		}
+	}
+	if createdCount != 1 {
+		t.Errorf("newly created result count = %d, want 1", createdCount)
 	}
 
 	var count int
@@ -76,6 +84,40 @@ func TestIntegrationCreateOrGetConcurrentSameIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestIntegrationCreateUsesDatabaseTime(t *testing.T) {
+	repository := integrationRepository(t)
+	before := integrationDatabaseTime(t)
+
+	stored, created, err := repository.CreateOrGet(
+		context.Background(),
+		integrationUUID(10),
+		"EUR/MXN",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CreateOrGet returned an error: %v", err)
+	}
+	if !created {
+		t.Fatal("CreateOrGet reported a new update as an idempotency replay")
+	}
+	after := integrationDatabaseTime(t)
+
+	if stored.CreatedAt.Before(before) || stored.CreatedAt.After(after) {
+		t.Errorf("created at = %v, want between %v and %v", stored.CreatedAt, before, after)
+	}
+	if !stored.UpdatedAt.Equal(stored.CreatedAt) {
+		t.Errorf("updated at = %v, want created at %v", stored.UpdatedAt, stored.CreatedAt)
+	}
+}
+
+func TestIntegrationReadyChecksSchemaVersion(t *testing.T) {
+	repository := integrationRepository(t)
+
+	if err := repository.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready returned an error for the current schema: %v", err)
+	}
+}
+
 func TestIntegrationTakeNextPendingUpdateSingleClaim(t *testing.T) {
 	repository := integrationRepository(t)
 	pending := createPendingIntegrationUpdate(
@@ -83,7 +125,6 @@ func TestIntegrationTakeNextPendingUpdateSingleClaim(t *testing.T) {
 		repository,
 		20,
 		"EUR/MXN",
-		integrationTime(0),
 	)
 
 	type result struct {
@@ -102,10 +143,7 @@ func TestIntegrationTakeNextPendingUpdateSingleClaim(t *testing.T) {
 			defer workers.Done()
 			<-start
 
-			claim, found, err := repository.TakeNextPendingUpdate(
-				context.Background(),
-				integrationTime(1),
-			)
+			claim, found, err := repository.TakeNextPendingUpdate(context.Background())
 			results <- result{claim: claim, found: found, err: err}
 		}()
 	}
@@ -143,14 +181,12 @@ func TestIntegrationTakeNextPendingUpdateSkipsLockedHead(t *testing.T) {
 		repository,
 		30,
 		"EUR/MXN",
-		integrationTime(0),
 	)
 	tail := createPendingIntegrationUpdate(
 		t,
 		repository,
 		31,
 		"USD/MXN",
-		integrationTime(1),
 	)
 
 	tx, err := integrationDB.Begin(context.Background())
@@ -172,10 +208,7 @@ func TestIntegrationTakeNextPendingUpdateSkipsLockedHead(t *testing.T) {
 		t.Fatalf("lock head quote update: %v", err)
 	}
 
-	claim, found, err := repository.TakeNextPendingUpdate(
-		context.Background(),
-		integrationTime(2),
-	)
+	claim, found, err := repository.TakeNextPendingUpdate(context.Background())
 	if err != nil {
 		t.Fatalf("TakeNextPendingUpdate returned an error: %v", err)
 	}
@@ -194,14 +227,13 @@ func TestIntegrationStaleLeaseCannotFinalize(t *testing.T) {
 		repository,
 		40,
 		"EUR/MXN",
-		integrationTime(0),
 	)
 
-	staleClaim := takeIntegrationUpdate(t, repository, integrationTime(1))
+	staleClaim := takeIntegrationUpdate(t, repository)
+	markIntegrationUpdateStale(t, staleClaim.Update.ID)
 	requeued, err := repository.RequeueStaleProcessingUpdates(
 		context.Background(),
-		integrationTime(2),
-		integrationTime(3),
+		time.Hour,
 	)
 	if err != nil {
 		t.Fatalf("RequeueStaleProcessingUpdates returned an error: %v", err)
@@ -210,7 +242,7 @@ func TestIntegrationStaleLeaseCannotFinalize(t *testing.T) {
 		t.Fatalf("requeued update count = %d, want 1", requeued)
 	}
 
-	currentClaim := takeIntegrationUpdate(t, repository, integrationTime(4))
+	currentClaim := takeIntegrationUpdate(t, repository)
 	if currentClaim.LeaseToken != staleClaim.LeaseToken+1 {
 		t.Fatalf(
 			"current lease token = %d, want %d",
@@ -224,7 +256,6 @@ func TestIntegrationStaleLeaseCannotFinalize(t *testing.T) {
 		context.Background(),
 		staleClaim,
 		quote,
-		integrationTime(6),
 	)
 	if err != nil {
 		t.Fatalf("CompleteUpdate with stale lease returned an error: %v", err)
@@ -236,8 +267,7 @@ func TestIntegrationStaleLeaseCannotFinalize(t *testing.T) {
 	failed, err := repository.FailUpdate(
 		context.Background(),
 		staleClaim,
-		"stale failure",
-		integrationTime(7),
+		integrationFailure(),
 	)
 	if err != nil {
 		t.Fatalf("FailUpdate with stale lease returned an error: %v", err)
@@ -287,17 +317,15 @@ func TestIntegrationCompleteUpdatePersistsResult(t *testing.T) {
 		repository,
 		50,
 		"EUR/MXN",
-		integrationTime(0),
 	)
-	claim := takeIntegrationUpdate(t, repository, integrationTime(1))
+	claim := takeIntegrationUpdate(t, repository)
 	quote := integrationQuote(t, claim, "18.500000000000", integrationTime(2))
-	completedAt := integrationTime(3)
+	before := integrationDatabaseTime(t)
 
 	completed, err := repository.CompleteUpdate(
 		context.Background(),
 		claim,
 		quote,
-		completedAt,
 	)
 	if err != nil {
 		t.Fatalf("CompleteUpdate returned an error: %v", err)
@@ -305,6 +333,7 @@ func TestIntegrationCompleteUpdatePersistsResult(t *testing.T) {
 	if !completed {
 		t.Fatal("CompleteUpdate did not complete the current claim")
 	}
+	after := integrationDatabaseTime(t)
 
 	result, found, err := repository.GetByID(context.Background(), claim.Update.ID)
 	if err != nil {
@@ -316,8 +345,8 @@ func TestIntegrationCompleteUpdatePersistsResult(t *testing.T) {
 	if result.Update.Status != domain.UpdateCompleted {
 		t.Errorf("status = %q, want %q", result.Update.Status, domain.UpdateCompleted)
 	}
-	if !result.Update.UpdatedAt.Equal(completedAt) {
-		t.Errorf("updated at = %v, want %v", result.Update.UpdatedAt, completedAt)
+	if result.Update.UpdatedAt.Before(before) || result.Update.UpdatedAt.After(after) {
+		t.Errorf("updated at = %v, want between %v and %v", result.Update.UpdatedAt, before, after)
 	}
 	if result.Quote == nil {
 		t.Fatal("GetByID returned no quote for a completed update")
@@ -358,9 +387,8 @@ func TestIntegrationCompleteUpdateRollsBackOnRateInsertFailure(t *testing.T) {
 		repository,
 		60,
 		"EUR/MXN",
-		integrationTime(0),
 	)
-	claim := takeIntegrationUpdate(t, repository, integrationTime(1))
+	claim := takeIntegrationUpdate(t, repository)
 	quote := domain.Quote{
 		UpdateID:  claim.Update.ID,
 		Pair:      claim.Update.Pair,
@@ -373,7 +401,6 @@ func TestIntegrationCompleteUpdateRollsBackOnRateInsertFailure(t *testing.T) {
 		context.Background(),
 		claim,
 		quote,
-		integrationTime(4),
 	)
 	if err == nil {
 		t.Fatal("CompleteUpdate returned nil error for an invalid database rate")
@@ -404,29 +431,27 @@ func TestIntegrationRequeueStaleProcessingUpdates(t *testing.T) {
 		repository,
 		70,
 		"EUR/MXN",
-		integrationTime(0),
 	)
 	freshUpdate := createPendingIntegrationUpdate(
 		t,
 		repository,
 		71,
 		"USD/MXN",
-		integrationTime(1),
 	)
 
-	staleClaim := takeIntegrationUpdate(t, repository, integrationTime(2))
-	freshClaim := takeIntegrationUpdate(t, repository, integrationTime(10))
+	staleClaim := takeIntegrationUpdate(t, repository)
+	freshClaim := takeIntegrationUpdate(t, repository)
 	if staleClaim.Update.ID != staleUpdate.ID {
 		t.Fatalf("first claimed update ID = %s, want %s", staleClaim.Update.ID, staleUpdate.ID)
 	}
 	if freshClaim.Update.ID != freshUpdate.ID {
 		t.Fatalf("second claimed update ID = %s, want %s", freshClaim.Update.ID, freshUpdate.ID)
 	}
+	markIntegrationUpdateStale(t, staleClaim.Update.ID)
 
 	requeued, err := repository.RequeueStaleProcessingUpdates(
 		context.Background(),
-		integrationTime(5),
-		integrationTime(11),
+		time.Hour,
 	)
 	if err != nil {
 		t.Fatalf("RequeueStaleProcessingUpdates returned an error: %v", err)
@@ -435,7 +460,7 @@ func TestIntegrationRequeueStaleProcessingUpdates(t *testing.T) {
 		t.Fatalf("requeued update count = %d, want 1", requeued)
 	}
 
-	reclaimed := takeIntegrationUpdate(t, repository, integrationTime(12))
+	reclaimed := takeIntegrationUpdate(t, repository)
 	if reclaimed.Update.ID != staleUpdate.ID {
 		t.Fatalf("reclaimed update ID = %s, want %s", reclaimed.Update.ID, staleUpdate.ID)
 	}
@@ -450,8 +475,7 @@ func TestIntegrationRequeueStaleProcessingUpdates(t *testing.T) {
 	failed, err := repository.FailUpdate(
 		context.Background(),
 		reclaimed,
-		"provider unavailable",
-		integrationTime(13),
+		integrationFailure(),
 	)
 	if err != nil {
 		t.Fatalf("FailUpdate returned an error: %v", err)
@@ -470,8 +494,15 @@ func TestIntegrationRequeueStaleProcessingUpdates(t *testing.T) {
 	if failedResult.Update.Status != domain.UpdateFailed {
 		t.Errorf("failed status = %q, want %q", failedResult.Update.Status, domain.UpdateFailed)
 	}
-	if failedResult.Update.Error != "provider unavailable" {
-		t.Errorf("failure message = %q, want %q", failedResult.Update.Error, "provider unavailable")
+	if failedResult.Update.FailureCode != domain.UpdateFailureRateProvider {
+		t.Errorf("failure code = %q, want %q", failedResult.Update.FailureCode, domain.UpdateFailureRateProvider)
+	}
+	if failedResult.Update.FailureMessage != "failed to fetch exchange rate" {
+		t.Errorf(
+			"failure message = %q, want %q",
+			failedResult.Update.FailureMessage,
+			"failed to fetch exchange rate",
+		)
 	}
 
 	freshResult, found, err := repository.GetByID(context.Background(), freshClaim.Update.ID)
@@ -518,7 +549,6 @@ func TestIntegrationGetLatestReturnsNewestCompletedQuote(t *testing.T) {
 		repository,
 		83,
 		"EUR/MXN",
-		integrationTime(7),
 	)
 
 	latest, found, err := repository.GetLatest(context.Background(), "EUR/MXN")
@@ -554,33 +584,25 @@ func TestIntegrationGetLatestReturnsNewestCompletedQuote(t *testing.T) {
 	}
 }
 
-func pendingIntegrationUpdate(
-	sequence int,
-	pair domain.Pair,
-	createdAt time.Time,
-) domain.QuoteUpdate {
-	return domain.QuoteUpdate{
-		ID:        integrationUUID(sequence),
-		Pair:      pair,
-		Status:    domain.UpdatePending,
-		CreatedAt: createdAt,
-		UpdatedAt: createdAt,
-	}
-}
-
 func createPendingIntegrationUpdate(
 	t *testing.T,
 	repository *storagepostgres.QuoteUpdateRepository,
 	sequence int,
 	pair domain.Pair,
-	createdAt time.Time,
 ) domain.QuoteUpdate {
 	t.Helper()
 
-	update := pendingIntegrationUpdate(sequence, pair, createdAt)
-	stored, err := repository.CreateOrGet(context.Background(), update, nil)
+	stored, created, err := repository.CreateOrGet(
+		context.Background(),
+		integrationUUID(sequence),
+		pair,
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("create pending quote update: %v", err)
+	}
+	if !created {
+		t.Fatal("create pending quote update: repository reported an idempotency replay")
 	}
 
 	return stored
@@ -589,11 +611,10 @@ func createPendingIntegrationUpdate(
 func takeIntegrationUpdate(
 	t *testing.T,
 	repository *storagepostgres.QuoteUpdateRepository,
-	startedAt time.Time,
 ) service.ClaimedQuoteUpdate {
 	t.Helper()
 
-	claim, found, err := repository.TakeNextPendingUpdate(context.Background(), startedAt)
+	claim, found, err := repository.TakeNextPendingUpdate(context.Background())
 	if err != nil {
 		t.Fatalf("take pending quote update: %v", err)
 	}
@@ -610,7 +631,7 @@ func createCompletedIntegrationQuote(
 	sequence int,
 	pair domain.Pair,
 	rate string,
-	completedAt time.Time,
+	fetchedAt time.Time,
 ) domain.Quote {
 	t.Helper()
 
@@ -619,16 +640,14 @@ func createCompletedIntegrationQuote(
 		repository,
 		sequence,
 		pair,
-		completedAt.Add(-2*time.Second),
 	)
-	claim := takeIntegrationUpdate(t, repository, completedAt.Add(-time.Second))
-	quote := integrationQuote(t, claim, rate, completedAt.Add(-time.Second))
+	claim := takeIntegrationUpdate(t, repository)
+	quote := integrationQuote(t, claim, rate, fetchedAt)
 
 	completed, err := repository.CompleteUpdate(
 		context.Background(),
 		claim,
 		quote,
-		completedAt,
 	)
 	if err != nil {
 		t.Fatalf("complete quote update: %v", err)
@@ -638,6 +657,38 @@ func createCompletedIntegrationQuote(
 	}
 
 	return quote
+}
+
+func markIntegrationUpdateStale(t *testing.T, updateID uuid.UUID) {
+	t.Helper()
+
+	if _, err := integrationDB.Exec(
+		context.Background(),
+		`UPDATE quote_updates
+		 SET updated_at = CURRENT_TIMESTAMP - INTERVAL '2 hours'
+		 WHERE id = $1`,
+		updateID.String(),
+	); err != nil {
+		t.Fatalf("mark quote update stale: %v", err)
+	}
+}
+
+func integrationDatabaseTime(t *testing.T) time.Time {
+	t.Helper()
+
+	var now time.Time
+	if err := integrationDB.QueryRow(context.Background(), "SELECT CURRENT_TIMESTAMP").Scan(&now); err != nil {
+		t.Fatalf("read PostgreSQL time: %v", err)
+	}
+
+	return now
+}
+
+func integrationFailure() service.QuoteUpdateFailure {
+	return service.QuoteUpdateFailure{
+		Code:    domain.UpdateFailureRateProvider,
+		Message: "failed to fetch exchange rate",
+	}
 }
 
 func integrationQuote(

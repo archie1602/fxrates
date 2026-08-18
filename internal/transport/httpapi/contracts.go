@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"fxrates/internal/domain"
+	"fxrates/internal/service"
 )
 
 type QuoteUpdateRequester interface {
@@ -13,7 +14,7 @@ type QuoteUpdateRequester interface {
 		ctx context.Context,
 		pair domain.Pair,
 		idempotencyKey *uuid.UUID,
-	) (domain.QuoteUpdate, error)
+	) (service.CreateQuoteUpdateResult, error)
 	GetQuoteUpdate(ctx context.Context, updateID uuid.UUID) (domain.QuoteUpdateResult, error)
 	GetLatest(ctx context.Context, pair domain.Pair) (domain.Quote, error)
 }

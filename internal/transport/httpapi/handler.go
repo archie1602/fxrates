@@ -15,6 +15,8 @@ import (
 	"fxrates/internal/service"
 )
 
+const maxRequestBodyBytes = 1 << 20
+
 type Handler struct {
 	service   QuoteUpdateRequester
 	readiness ReadinessChecker
@@ -42,6 +44,13 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/quote-updates", h.createQuoteUpdate)
 	mux.HandleFunc("GET /api/v1/quote-updates/{id}", h.getQuoteUpdate)
 	mux.HandleFunc("GET /api/v1/quotes/latest", h.getLatest)
+
+	mux.HandleFunc("/healthz", methodNotAllowed(http.MethodGet, http.MethodHead))
+	mux.HandleFunc("/readyz", methodNotAllowed(http.MethodGet, http.MethodHead))
+	mux.HandleFunc("/api/v1/quote-updates", methodNotAllowed(http.MethodPost))
+	mux.HandleFunc("/api/v1/quote-updates/{id}", methodNotAllowed(http.MethodGet, http.MethodHead))
+	mux.HandleFunc("/api/v1/quotes/latest", methodNotAllowed(http.MethodGet, http.MethodHead))
+	mux.HandleFunc("/", notFound)
 
 	return recoverMiddleware(h.logger, mux)
 }
@@ -79,14 +88,14 @@ func (h *Handler) createQuoteUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var request createQuoteUpdateRequestDTO
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", "request body must contain one valid JSON object")
+		writeRequestDecodeError(w, err)
 		return
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeError(w, http.StatusBadRequest, "invalid_request", "request body must contain one valid JSON object")
+		writeRequestDecodeError(w, err)
 		return
 	}
 
@@ -100,14 +109,46 @@ func (h *Handler) createQuoteUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	update, err := h.service.CreateQuoteUpdate(r.Context(), pair, idempotencyKey)
+	result, err := h.service.CreateQuoteUpdate(r.Context(), pair, idempotencyKey)
 	if err != nil {
 		h.writeServiceError(w, err)
 		return
 	}
 
-	w.Header().Set("Location", "/api/v1/quote-updates/"+update.ID.String())
-	writeJSON(w, http.StatusAccepted, mapUpdateResponseToDTO(update))
+	status := http.StatusAccepted
+	if !result.Created {
+		status = http.StatusOK
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
+	w.Header().Set("Location", "/api/v1/quote-updates/"+result.Update.ID.String())
+	writeJSON(w, status, mapUpdateResponseToDTO(result.Update))
+}
+
+func writeRequestDecodeError(w http.ResponseWriter, err error) {
+	var maxBytesError *http.MaxBytesError
+	if errors.As(err, &maxBytesError) {
+		writeError(
+			w,
+			http.StatusRequestEntityTooLarge,
+			"request_too_large",
+			"request body exceeds the maximum allowed size",
+		)
+		return
+	}
+
+	writeError(w, http.StatusBadRequest, "invalid_request", "request body must contain one valid JSON object")
+}
+
+func methodNotAllowed(allowedMethods ...string) http.HandlerFunc {
+	allow := strings.Join(allowedMethods, ", ")
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Allow", allow)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	}
+}
+
+func notFound(w http.ResponseWriter, _ *http.Request) {
+	writeError(w, http.StatusNotFound, "not_found", "resource not found")
 }
 
 func parseIdempotencyKey(header http.Header) (*uuid.UUID, error) {

@@ -71,7 +71,6 @@ func run(logger *slog.Logger) error {
 
 	quoteService := service.NewQuoteService(
 		updateRepository,
-		timeProvider,
 		service.UUIDv7Generator{},
 	)
 	quoteUpdateWorkers := make([]*service.QuoteUpdateWorker, 0, cfg.WorkerCount)
@@ -90,7 +89,6 @@ func run(logger *slog.Logger) error {
 	}
 	quoteUpdateRecoveryWorker, err := service.NewQuoteUpdateRecoveryWorker(
 		updateRepository,
-		timeProvider,
 		logger,
 		cfg.RecoveryInterval,
 		cfg.ProcessingTimeout,

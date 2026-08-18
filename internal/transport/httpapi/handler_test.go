@@ -24,11 +24,14 @@ func TestCreateQuoteUpdate(t *testing.T) {
 	idempotencyKey := uuid.MustParse("10000000-0000-4000-8000-000000000001")
 	createdAt := time.Date(2026, time.August, 7, 12, 30, 0, 0, time.UTC)
 	serviceStub := &quoteServiceStub{
-		createResult: domain.QuoteUpdate{
-			ID:        updateID,
-			Pair:      "EUR/MXN",
-			Status:    domain.UpdatePending,
-			CreatedAt: createdAt,
+		createResult: service.CreateQuoteUpdateResult{
+			Update: domain.QuoteUpdate{
+				ID:        updateID,
+				Pair:      "EUR/MXN",
+				Status:    domain.UpdatePending,
+				CreatedAt: createdAt,
+			},
+			Created: true,
 		},
 	}
 	request := httptest.NewRequest(
@@ -54,6 +57,36 @@ func TestCreateQuoteUpdate(t *testing.T) {
 	wantLocation := "/api/v1/quote-updates/" + updateID.String()
 	if response.Header().Get("Location") != wantLocation {
 		t.Errorf("Location = %q, want %q", response.Header().Get("Location"), wantLocation)
+	}
+}
+
+func TestCreateQuoteUpdateIdempotencyReplay(t *testing.T) {
+	updateID := uuid.MustParse("01900000-0000-7000-8000-000000000001")
+	serviceStub := &quoteServiceStub{
+		createResult: service.CreateQuoteUpdateResult{
+			Update: domain.QuoteUpdate{
+				ID:     updateID,
+				Pair:   "EUR/MXN",
+				Status: domain.UpdateCompleted,
+			},
+		},
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/quote-updates",
+		strings.NewReader(`{"pair":"EUR/MXN"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "10000000-0000-4000-8000-000000000001")
+	response := httptest.NewRecorder()
+
+	newTestHandler(serviceStub).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if response.Header().Get("Idempotency-Replayed") != "true" {
+		t.Errorf("Idempotency-Replayed = %q, want %q", response.Header().Get("Idempotency-Replayed"), "true")
 	}
 }
 
@@ -141,18 +174,128 @@ func TestCreateQuoteUpdateIdempotencyErrors(t *testing.T) {
 	}
 }
 
+func TestCreateQuoteUpdateRejectsOversizedBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "while decoding request",
+			body: `{"pair":"` + strings.Repeat("x", 1<<20) + `"}`,
+		},
+		{
+			name: "while checking for another JSON value",
+			body: `{"pair":"EUR/MXN"}` + strings.Repeat(" ", 1<<20),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			serviceStub := &quoteServiceStub{}
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/quote-updates",
+				strings.NewReader(test.body),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+
+			newTestHandler(serviceStub).ServeHTTP(response, request)
+
+			if response.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusRequestEntityTooLarge)
+			}
+			if code := decodeErrorCode(t, response); code != "request_too_large" {
+				t.Errorf("error code = %q, want %q", code, "request_too_large")
+			}
+			if serviceStub.createCalls != 0 {
+				t.Errorf("CreateQuoteUpdate calls = %d, want 0", serviceStub.createCalls)
+			}
+		})
+	}
+}
+
+func TestRoutesReturnJSONErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+		wantCode   string
+		wantAllow  string
+	}{
+		{
+			name:       "unknown path",
+			method:     http.MethodGet,
+			path:       "/unknown",
+			wantStatus: http.StatusNotFound,
+			wantCode:   "not_found",
+		},
+		{
+			name:       "wrong method",
+			method:     http.MethodPut,
+			path:       "/api/v1/quote-updates",
+			wantStatus: http.StatusMethodNotAllowed,
+			wantCode:   "method_not_allowed",
+			wantAllow:  http.MethodPost,
+		},
+		{
+			name:       "options without CORS",
+			method:     http.MethodOptions,
+			path:       "/api/v1/quotes/latest",
+			wantStatus: http.StatusMethodNotAllowed,
+			wantCode:   "method_not_allowed",
+			wantAllow:  "GET, HEAD",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, nil)
+			response := httptest.NewRecorder()
+
+			newTestHandler(&quoteServiceStub{}).ServeHTTP(response, request)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d", response.Code, test.wantStatus)
+			}
+			if response.Header().Get("Content-Type") != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", response.Header().Get("Content-Type"))
+			}
+			if response.Header().Get("Allow") != test.wantAllow {
+				t.Errorf("Allow = %q, want %q", response.Header().Get("Allow"), test.wantAllow)
+			}
+			if code := decodeErrorCode(t, response); code != test.wantCode {
+				t.Errorf("error code = %q, want %q", code, test.wantCode)
+			}
+		})
+	}
+}
+
+func TestRoutesAcceptHEADForGETEndpoint(t *testing.T) {
+	request := httptest.NewRequest(http.MethodHead, "/healthz", nil)
+	response := httptest.NewRecorder()
+
+	newTestHandler(&quoteServiceStub{}).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
 func TestGetFailedQuoteUpdate(t *testing.T) {
 	updateID := uuid.MustParse("01900000-0000-7000-8000-000000000001")
 	updatedAt := time.Date(2026, time.August, 7, 12, 30, 0, 0, time.UTC)
-	failureMessage := "fetch rate: provider unavailable"
+	failureMessage := "failed to fetch exchange rate"
 	serviceStub := &quoteServiceStub{
 		getResult: domain.QuoteUpdateResult{
 			Update: domain.QuoteUpdate{
-				ID:        updateID,
-				Pair:      "EUR/MXN",
-				Status:    domain.UpdateFailed,
-				Error:     failureMessage,
-				UpdatedAt: updatedAt,
+				ID:             updateID,
+				Pair:           "EUR/MXN",
+				Status:         domain.UpdateFailed,
+				FailureCode:    domain.UpdateFailureRateProvider,
+				FailureMessage: failureMessage,
+				UpdatedAt:      updatedAt,
 			},
 		},
 	}
@@ -169,9 +312,10 @@ func TestGetFailedQuoteUpdate(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
 	}
 	var body struct {
-		Status       domain.UpdateStatus `json:"status"`
-		UpdatedAt    time.Time           `json:"updated_at"`
-		ErrorMessage *string             `json:"error_message"`
+		Status       domain.UpdateStatus       `json:"status"`
+		UpdatedAt    time.Time                 `json:"updated_at"`
+		FailureCode  *domain.UpdateFailureCode `json:"failure_code"`
+		ErrorMessage *string                   `json:"error_message"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -181,6 +325,9 @@ func TestGetFailedQuoteUpdate(t *testing.T) {
 	}
 	if body.UpdatedAt != updatedAt {
 		t.Errorf("updated_at = %v, want %v", body.UpdatedAt, updatedAt)
+	}
+	if body.FailureCode == nil || *body.FailureCode != domain.UpdateFailureRateProvider {
+		t.Errorf("failure_code = %v, want %q", body.FailureCode, domain.UpdateFailureRateProvider)
 	}
 	if body.ErrorMessage == nil || *body.ErrorMessage != failureMessage {
 		t.Errorf("error_message = %v, want %q", body.ErrorMessage, failureMessage)
@@ -262,7 +409,7 @@ func decodeErrorCode(t *testing.T, response *httptest.ResponseRecorder) string {
 }
 
 type quoteServiceStub struct {
-	createResult   domain.QuoteUpdate
+	createResult   service.CreateQuoteUpdateResult
 	createErr      error
 	createCalls    int
 	createdPair    domain.Pair
@@ -286,7 +433,7 @@ func (s *quoteServiceStub) CreateQuoteUpdate(
 	_ context.Context,
 	pair domain.Pair,
 	idempotencyKey *uuid.UUID,
-) (domain.QuoteUpdate, error) {
+) (service.CreateQuoteUpdateResult, error) {
 	s.createCalls++
 	s.createdPair = pair
 	s.idempotencyKey = idempotencyKey

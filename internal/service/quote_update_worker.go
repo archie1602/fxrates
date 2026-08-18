@@ -5,10 +5,28 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"time"
 
 	"fxrates/internal/domain"
 )
+
+const (
+	rateProviderFailureMessage     = "failed to fetch exchange rate"
+	maxWorkerInfrastructureBackoff = 30 * time.Second
+)
+
+type workerInfrastructureError struct {
+	err error
+}
+
+func (e *workerInfrastructureError) Error() string {
+	return e.err.Error()
+}
+
+func (e *workerInfrastructureError) Unwrap() error {
+	return e.err
+}
 
 type QuoteUpdateWorker struct {
 	updates      QuoteUpdateProcessorRepository
@@ -51,6 +69,7 @@ func NewQuoteUpdateWorker(
 }
 
 func (w *QuoteUpdateWorker) Run(ctx context.Context) error {
+	infrastructureFailures := 0
 	for {
 		processed, err := w.processNext(ctx)
 		if ctx.Err() != nil {
@@ -58,12 +77,22 @@ func (w *QuoteUpdateWorker) Run(ctx context.Context) error {
 		}
 
 		if err != nil {
-			w.logger.Error("failed to process quote update", "error", err)
-			if err := waitForNextPoll(ctx, w.pollInterval); err != nil {
+			delay := w.pollInterval
+			var infrastructureErr *workerInfrastructureError
+			if errors.As(err, &infrastructureErr) {
+				infrastructureFailures++
+				delay = workerInfrastructureBackoff(w.pollInterval, infrastructureFailures)
+			} else {
+				infrastructureFailures = 0
+			}
+
+			w.logger.Error("failed to process quote update", "error", err, "retry_in", delay)
+			if err := waitForNextPoll(ctx, delay); err != nil {
 				return nil
 			}
 			continue
 		}
+		infrastructureFailures = 0
 
 		if processed {
 			continue
@@ -76,9 +105,9 @@ func (w *QuoteUpdateWorker) Run(ctx context.Context) error {
 }
 
 func (w *QuoteUpdateWorker) processNext(ctx context.Context) (bool, error) {
-	claim, found, err := w.updates.TakeNextPendingUpdate(ctx, w.timeProvider.NowUTC())
+	claim, found, err := w.updates.TakeNextPendingUpdate(ctx)
 	if err != nil {
-		return false, fmt.Errorf("take pending quote update: %w", err)
+		return false, &workerInfrastructureError{err: fmt.Errorf("take pending quote update: %w", err)}
 	}
 	if !found {
 		return false, nil
@@ -110,9 +139,11 @@ func (w *QuoteUpdateWorker) processNext(ctx context.Context) (bool, error) {
 		FetchedAt: fetchedAt,
 	}
 
-	completed, err := w.updates.CompleteUpdate(ctx, claim, quote, fetchedAt)
+	completed, err := w.updates.CompleteUpdate(ctx, claim, quote)
 	if err != nil {
-		return true, fmt.Errorf("complete quote update %s: %w", update.ID, err)
+		return true, &workerInfrastructureError{
+			err: fmt.Errorf("complete quote update %s: %w", update.ID, err),
+		}
 	}
 	if !completed {
 		w.logger.Warn(
@@ -143,14 +174,18 @@ func (w *QuoteUpdateWorker) failUpdate(
 	failed, markFailedErr := w.updates.FailUpdate(
 		ctx,
 		claim,
-		cause.Error(),
-		w.timeProvider.NowUTC(),
+		QuoteUpdateFailure{
+			Code:    domain.UpdateFailureRateProvider,
+			Message: rateProviderFailureMessage,
+		},
 	)
 	if markFailedErr != nil {
-		return errors.Join(
-			fmt.Errorf("process quote update %s: %w", update.ID, cause),
-			fmt.Errorf("mark quote update as failed: %w", markFailedErr),
-		)
+		return &workerInfrastructureError{
+			err: errors.Join(
+				fmt.Errorf("process quote update %s: %w", update.ID, cause),
+				fmt.Errorf("mark quote update as failed: %w", markFailedErr),
+			),
+		}
 	}
 	if !failed {
 		w.logger.Warn(
@@ -163,6 +198,29 @@ func (w *QuoteUpdateWorker) failUpdate(
 	}
 
 	return fmt.Errorf("process quote update %s: %w", update.ID, cause)
+}
+
+func workerInfrastructureBackoff(base time.Duration, failures int) time.Duration {
+	if failures < 1 {
+		return base
+	}
+
+	limit := max(base, maxWorkerInfrastructureBackoff)
+	ceiling := base
+	for failure := 1; failure < failures && ceiling < limit; failure++ {
+		if ceiling > limit/2 {
+			ceiling = limit
+			break
+		}
+		ceiling *= 2
+	}
+
+	floor := ceiling / 2
+	if floor == ceiling {
+		return ceiling
+	}
+
+	return floor + time.Duration(rand.Int64N(int64(ceiling-floor)+1))
 }
 
 func waitForNextPoll(ctx context.Context, interval time.Duration) error {

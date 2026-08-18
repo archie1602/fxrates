@@ -31,8 +31,11 @@ Idempotency-Key: {{idempotencyKey}}
 > {%
     const updateId = response.body["update_id"];
 
-    client.test("Quote update is accepted", function () {
-        client.assert(response.status === 202, "Expected HTTP 202");
+    client.test("Quote update is created or replayed", function () {
+        client.assert(
+            response.status === 200 || response.status === 202,
+            "Expected HTTP 200 or 202"
+        );
         client.assert(updateId, "Response does not contain update_id");
     });
 
